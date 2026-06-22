@@ -226,7 +226,7 @@
 #define GGML_MAX_OP_PARAMS      64
 
 #ifndef GGML_MAX_NAME
-#   define GGML_MAX_NAME        64
+#   define GGML_MAX_NAME        128
 #endif
 
 #define GGML_DEFAULT_N_THREADS  4
@@ -568,6 +568,11 @@ extern "C" {
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
+        GGML_OP_KOKORO_LSTM_SCAN,
+        GGML_OP_KOKORO_LSTM_STEP,
+        GGML_OP_KOKORO_CONV_1D,
+        GGML_OP_KOKORO_SNAKE_1D_T,
+        GGML_OP_KOKORO_ADAIN_SNAKE_1D_T,
 
         GGML_OP_UNARY,
 
@@ -583,6 +588,10 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+        GGML_OP_STFT,
+        GGML_OP_AA_STFT,
+        GGML_OP_ISTFT,
+        GGML_OP_AA_ISTFT,
 
         GGML_OP_COUNT,
     };
@@ -1765,6 +1774,28 @@ extern "C" {
             float                 scale,
             float                 max_bias);
 
+    // Short-Time Fourier Transform is a type of Fourier transform used to
+    // determine sinusoidal frequency and phase content for windowed sections of
+    // a signal as it changes over time.
+    GGML_API struct ggml_tensor * ggml_stft(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * w,
+            int                   filter_length,
+            int                   hop_length,
+            bool                  compute_abs_and_angle);
+
+    // Inverse Short-Time Fourier Transform recovers the processed signal from
+    // the STFT operation. Window-squared normalization is expected to be applied
+    // separately by the caller.
+    GGML_API struct ggml_tensor * ggml_istft(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * w,
+            int                   filter_length,
+            int                   hop_length,
+            bool                  from_abs_and_angle);
+
     // rotary position embedding
     // if (mode & 1) - skip n_past elements (NOT SUPPORTED)
     // if (mode & GGML_ROPE_TYPE_NEOX) - GPT-NeoX style
@@ -2059,6 +2090,16 @@ extern "C" {
             int                   s0,  // stride
             int                   p0,  // padding
             int                   d0); // dilation
+
+    GGML_API struct ggml_tensor * ggml_conv_transpose_1d_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,   // convolution kernel
+            struct ggml_tensor  * b,   // data
+            int                   s0,  // stride
+            int                   p0,  // padding
+            int                   d0,  // dilation
+            int                   op0, // output padding
+            int                   g0); // groups
 
     GGML_API struct ggml_tensor * ggml_conv_2d(
             struct ggml_context * ctx,
@@ -2572,6 +2613,68 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
             int64_t               K);
+
+    // Kokoro-specific LSTM scan. Expects:
+    // input_gates: [4 * hidden, sequence]
+    // recurrent_weights: [hidden, 4 * hidden]
+    // recurrent_biases: [4 * hidden]
+    // h0/c0: [hidden]
+    // Returns [hidden, sequence] in chronological order.
+    GGML_API struct ggml_tensor * ggml_kokoro_lstm_scan(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * input_gates,
+            struct ggml_tensor  * recurrent_weights,
+            struct ggml_tensor  * recurrent_biases,
+            struct ggml_tensor  * h0,
+            struct ggml_tensor  * c0,
+            bool                  reversed);
+
+    // Kokoro-specific fused LSTM pointwise step. Expects:
+    // input_gate_step: [4 * hidden] for one time step
+    // recurrent_linear: [4 * hidden], the recurrent matmul output without bias
+    // recurrent_biases: [4 * hidden]
+    // c0: [hidden]
+    // Returns [hidden, 2], where [:, 0] is h and [:, 1] is c.
+    GGML_API struct ggml_tensor * ggml_kokoro_lstm_step(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * input_gate_step,
+            struct ggml_tensor  * recurrent_linear,
+            struct ggml_tensor  * recurrent_biases,
+            struct ggml_tensor  * c0);
+
+    // Kokoro-specific fused Conv1D. Expects:
+    // weight: [kernel, in_channels, out_channels]
+    // input: [input_length, in_channels, batch]
+    // Returns [output_length, out_channels, batch].
+    GGML_API struct ggml_tensor * ggml_kokoro_conv_1d(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * input,
+            int                   s0,
+            int                   p0,
+            int                   d0);
+
+    // Kokoro-specific fused transpose + Snake1D activation. Expects:
+    // alpha: [1, channels] or [channels]
+    // input: [channels, length, batch]
+    // Returns [length, channels, batch].
+    GGML_API struct ggml_tensor * ggml_kokoro_snake_1d_t(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * alpha,
+            struct ggml_tensor  * input);
+
+    // Kokoro-specific fused AdaIN scale-shift + transpose + Snake1D activation.
+    // alpha: [1, channels] or [channels]
+    // input: [channels, length, batch]
+    // gamma: [channels] or [channels, 1]
+    // beta:  [channels] or [channels, 1]
+    // Returns [length, channels, batch].
+    GGML_API struct ggml_tensor * ggml_kokoro_adain_snake_1d_t(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * alpha,
+            struct ggml_tensor  * input,
+            struct ggml_tensor  * gamma,
+            struct ggml_tensor  * beta);
 
     // custom operators
 

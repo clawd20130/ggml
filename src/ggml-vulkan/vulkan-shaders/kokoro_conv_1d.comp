@@ -1,0 +1,56 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint output_length;
+    uint out_channels;
+    uint in_channels;
+    uint batch;
+    uint kernel;
+    uint input_length;
+    int s0;
+    int p0;
+    int d0;
+    uint input_nb0;
+    uint input_nb1;
+    uint input_nb2;
+    uint weight_nb1;
+    uint weight_nb2;
+    uint dst_nb1;
+    uint dst_nb2;
+} p;
+
+layout(binding = 0) readonly buffer Weight { float weight[]; };
+layout(binding = 1) readonly buffer Input { float input_data[]; };
+layout(binding = 2) writeonly buffer Dst { float dst[]; };
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint rows = p.output_length * p.batch;
+    const uint total = rows * p.out_channels;
+    if (idx >= total) {
+        return;
+    }
+
+    const uint row = idx % rows;
+    const uint oc = idx / rows;
+    const uint ow = row % p.output_length;
+    const uint n = row / p.output_length;
+
+    float sum = 0.0;
+    for (uint ic = 0; ic < p.in_channels; ++ic) {
+        for (uint kw = 0; kw < p.kernel; ++kw) {
+            const int iw = int(ow) * p.s0 + int(kw) * p.d0 - p.p0;
+            if (iw < 0 || iw >= int(p.input_length)) {
+                continue;
+            }
+
+            const uint weight_offset = kw + ic * p.weight_nb1 + oc * p.weight_nb2;
+            const uint input_offset = uint(iw) * p.input_nb0 + ic * p.input_nb1 + n * p.input_nb2;
+            sum += weight[weight_offset] * input_data[input_offset];
+        }
+    }
+
+    dst[row + oc * rows] = sum;
+}

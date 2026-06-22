@@ -1,0 +1,74 @@
+#version 450
+
+#include "types.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (push_constant) uniform parameter
+{
+    uint ne;
+    uint n_fft;
+    uint hop;
+    uint src0_ne0; uint src0_ne1; uint src0_ne2; uint src0_ne3;
+    uint src0_nb0; uint src0_nb1; uint src0_nb2; uint src0_nb3;
+    uint src1_nb0;
+    uint dst_ne0; uint dst_ne1;
+    uint dst_nb0; uint dst_nb1;
+} p;
+
+layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
+layout (binding = 1) readonly buffer W {B_TYPE data_w[];};
+layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+
+const float PI = 3.1415926535897932384626433832795;
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.z * 65536 + gl_GlobalInvocationID.y * 256 + gl_GlobalInvocationID.x;
+
+    if (idx >= p.ne) {
+        return;
+    }
+
+    const uint t = idx % p.dst_ne0;
+    const uint b = (idx / p.dst_ne0) % p.dst_ne1;
+    const uint n_half = p.n_fft / 2;
+    const bool one_sided = p.src0_ne0 == n_half + 1;
+
+    float acc = 0.0;
+
+    for (uint frame = 0; frame < p.src0_ne1; ++frame) {
+        const int rel = int(t) - int(frame * p.hop) + int(n_half);
+        if (rel < 0 || rel >= int(p.n_fft)) {
+            continue;
+        }
+
+        float frame_sample = 0.0;
+        for (uint k = 0; k < p.n_fft; ++k) {
+            uint input_k = k;
+            float mirror = 1.0;
+            if (one_sided && k >= n_half + 1) {
+                input_k = p.n_fft - k;
+                mirror = -1.0;
+            }
+
+            const uint base = input_k * p.src0_nb0 + frame * p.src0_nb1 + b * p.src0_nb2;
+            const float a0 = float(data_a[base]);
+            const float a1 = float(data_a[base + p.src0_nb3]);
+
+#if AA != 0
+            const float real = a0 * cos(a1);
+            const float imag = a0 * mirror * sin(a1);
+#else
+            const float real = a0;
+            const float imag = a1 * mirror;
+#endif
+
+            const float theta = 2.0 * PI * float(k) * float(rel) / float(p.n_fft);
+            frame_sample += real * cos(theta) - imag * sin(theta);
+        }
+
+        acc += (frame_sample / float(p.n_fft)) * float(data_w[uint(rel) * p.src1_nb0]);
+    }
+
+    data_d[t * p.dst_nb0 + b * p.dst_nb1] = D_TYPE(acc);
+}

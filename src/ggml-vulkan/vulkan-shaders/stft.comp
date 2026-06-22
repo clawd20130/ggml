@@ -1,0 +1,149 @@
+#version 450
+
+#include "types.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (push_constant) uniform parameter
+{
+    uint ne;
+    uint n_fft;
+    uint hop;
+    uint src0_ne0; uint src0_ne1;
+    uint src0_nb0; uint src0_nb1;
+    uint src1_nb0;
+    uint dst_ne0; uint dst_ne1; uint dst_ne2; uint dst_ne3;
+    uint dst_nb0; uint dst_nb1; uint dst_nb2; uint dst_nb3;
+} p;
+
+layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
+layout (binding = 1) readonly buffer W {B_TYPE data_w[];};
+layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+
+const float PI = 3.1415926535897932384626433832795;
+
+int reflect_index(int ai) {
+    const int len = int(p.src0_ne0);
+    if (ai < 0) {
+        return -ai;
+    }
+    if (ai >= len) {
+        return len - (ai - len + 1);
+    }
+    return ai;
+}
+
+void simple_dft20(inout float mdst[20], inout float phdst[20], inout float scratch[40], int base, int n_fft, int step) {
+    const float base_k = PI * -2.0 / float(n_fft);
+    for (int i = 0; i < n_fft; ++i) {
+        float tm = 0.0;
+        float tph = 0.0;
+        for (int ii = 0; ii < n_fft; ++ii) {
+            const float k = base_k * float(ii) * float(i);
+            const float m = cos(k);
+            const float expk = sin(k);
+            const int src = base + ii * step;
+            tm += mdst[src] * m - phdst[src] * expk;
+            tph += mdst[src] * expk + phdst[src] * m;
+        }
+        scratch[i * 2] = tm;
+        scratch[i * 2 + 1] = tph;
+    }
+    for (int i = 0; i < n_fft; ++i) {
+        const int dst = base + i * step;
+        mdst[dst] = scratch[i * 2];
+        phdst[dst] = scratch[i * 2 + 1];
+    }
+}
+
+void combine_radix20(inout float mdst[20], inout float phdst[20], inout float scratch[40], int base, int n_fft, int step) {
+    const float km = PI * -2.0 / float(n_fft);
+    for (int i = 0; 2 * i < n_fft; ++i) {
+        const float k = km * float(i);
+        const float k1 = cos(k);
+        const float k2 = sin(k);
+
+        const int pidx = base + i * 2 * step;
+        const int qidx = base + (i * 2 + 1) * step;
+        const float mp = mdst[pidx];
+        const float php = phdst[pidx];
+        const float mq = mdst[qidx] * k1 - k2 * phdst[qidx];
+        const float phq = mdst[qidx] * k2 + k1 * phdst[qidx];
+
+        scratch[i + n_fft] = php + phq;
+        scratch[i] = mp + mq;
+        scratch[(i + (n_fft / 2)) + n_fft] = php - phq;
+        scratch[i + (n_fft / 2)] = mp - mq;
+    }
+    for (int i = 0; i < n_fft; ++i) {
+        const int dst = base + i * step;
+        mdst[dst] = scratch[i];
+        phdst[dst] = scratch[i + n_fft];
+    }
+}
+
+void radix2_fft20(inout float mdst[20], inout float phdst[20], inout float scratch[40]) {
+    simple_dft20(mdst, phdst, scratch, 0, 5, 4);
+    simple_dft20(mdst, phdst, scratch, 2, 5, 4);
+    combine_radix20(mdst, phdst, scratch, 0, 10, 2);
+    simple_dft20(mdst, phdst, scratch, 1, 5, 4);
+    simple_dft20(mdst, phdst, scratch, 3, 5, 4);
+    combine_radix20(mdst, phdst, scratch, 1, 10, 2);
+    combine_radix20(mdst, phdst, scratch, 0, 20, 1);
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.z * 65536 + gl_GlobalInvocationID.y * 256 + gl_GlobalInvocationID.x;
+
+    if (idx >= p.ne) {
+        return;
+    }
+
+    uint rem = idx;
+    const uint i0 = rem % p.dst_ne0;
+    rem /= p.dst_ne0;
+    const uint i1 = rem % p.dst_ne1;
+    rem /= p.dst_ne1;
+    const uint i2 = rem % p.dst_ne2;
+    rem /= p.dst_ne2;
+    const uint i3 = rem;
+
+    const int n_half = int(p.n_fft / 2);
+    const int ch = int(i1 * p.hop);
+    float real = 0.0;
+    float imag = 0.0;
+
+    if (p.n_fft == 20) {
+        float mdst[20];
+        float phdst[20];
+        float scratch[40];
+        for (int n = 0; n < 20; ++n) {
+            const int ai = reflect_index(ch - n_half + n);
+            mdst[n] = float(data_a[uint(ai) * p.src0_nb0 + i2 * p.src0_nb1]) * float(data_w[uint(n) * p.src1_nb0]);
+            phdst[n] = 0.0;
+        }
+        radix2_fft20(mdst, phdst, scratch);
+        real = mdst[int(i0)];
+        imag = phdst[int(i0)];
+    } else {
+        for (uint n = 0; n < p.n_fft; ++n) {
+            const int ai = reflect_index(ch - n_half + int(n));
+            const float windowed = float(data_a[uint(ai) * p.src0_nb0 + i2 * p.src0_nb1]) * float(data_w[n * p.src1_nb0]);
+            const float theta = -2.0 * PI * float(n * i0) / float(p.n_fft);
+            real += windowed * cos(theta);
+            imag += windowed * sin(theta);
+        }
+    }
+
+#if AA != 0
+    float phase = atan(imag, real);
+    if (p.n_fft != 20 && phase < -PI + 0.0001) {
+        phase = PI;
+    }
+    const float outv = i3 == 0 ? sqrt(real * real + imag * imag) : phase;
+#else
+    const float outv = i3 == 0 ? real : imag;
+#endif
+
+    data_d[i0 * p.dst_nb0 + i1 * p.dst_nb1 + i2 * p.dst_nb2 + i3 * p.dst_nb3] = D_TYPE(outv);
+}

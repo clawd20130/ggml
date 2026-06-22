@@ -1,0 +1,51 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint hidden;
+    uint input_nb0;
+    uint linear_nb0;
+    uint bias_nb0;
+    uint c_nb0;
+    uint dst_nb0;
+    uint dst_nb1;
+} p;
+
+layout(binding = 0) readonly buffer InputGateStep { float input_gate_step[]; };
+layout(binding = 1) readonly buffer RecurrentLinear { float recurrent_linear[]; };
+layout(binding = 2) readonly buffer RecurrentBiases { float recurrent_biases[]; };
+layout(binding = 3) readonly buffer CPrev { float c_prev[]; };
+layout(binding = 4) writeonly buffer Dst { float dst[]; };
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    const uint j = gl_GlobalInvocationID.x;
+    if (j >= p.hidden) {
+        return;
+    }
+
+    float gate_values[4];
+    for (uint gate = 0; gate < 4; ++gate) {
+        const uint row = gate * p.hidden + j;
+        precise float r = recurrent_linear[row * p.linear_nb0] +
+                          recurrent_biases[row * p.bias_nb0];
+        gate_values[gate] = input_gate_step[row * p.input_nb0] + r;
+    }
+
+    precise float i = sigmoid(gate_values[0]);
+    precise float f = sigmoid(gate_values[1]);
+    precise float g = tanh(gate_values[2]);
+    precise float o = sigmoid(gate_values[3]);
+    precise float fc = f * c_prev[j * p.c_nb0];
+    precise float ig = i * g;
+    precise float c = fc + ig;
+    precise float tc = tanh(c);
+    precise float h = tc * o;
+
+    dst[j * p.dst_nb0] = h;
+    dst[j * p.dst_nb0 + p.dst_nb1] = c;
+}

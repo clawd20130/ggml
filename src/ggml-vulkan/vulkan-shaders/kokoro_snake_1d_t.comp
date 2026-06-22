@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint output_length;
+    uint channels;
+    uint batch;
+    uint input_nb0;
+    uint input_nb1;
+    uint input_nb2;
+    uint alpha_ne0;
+    uint alpha_ne1;
+    uint alpha_nb0;
+    uint alpha_nb1;
+} p;
+
+layout(binding = 0) readonly buffer Alpha { float alpha[]; };
+layout(binding = 1) readonly buffer Input { float input_data[]; };
+layout(binding = 2) writeonly buffer Dst { float dst[]; };
+
+float alpha_for_channel(uint channel) {
+    if (p.alpha_ne0 == 1 && p.alpha_ne1 == 1) {
+        return alpha[0];
+    }
+    if (p.alpha_ne0 > channel) {
+        return alpha[channel * p.alpha_nb0];
+    }
+    return alpha[channel * p.alpha_nb1];
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint total = p.output_length * p.channels * p.batch;
+    if (idx >= total) {
+        return;
+    }
+
+    const uint l = idx % p.output_length;
+    const uint c = (idx / p.output_length) % p.channels;
+    const uint n = idx / (p.output_length * p.channels);
+
+    const float x = input_data[c * p.input_nb0 + l * p.input_nb1 + n * p.input_nb2];
+    const float a = alpha_for_channel(c);
+    const float s = sin(x * a);
+    dst[idx] = x + s * s / a;
+}

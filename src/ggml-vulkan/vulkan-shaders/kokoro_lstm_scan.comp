@@ -1,0 +1,73 @@
+#version 450
+
+const uint num_threads = 256;
+
+layout(local_size_x = num_threads, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint hidden;
+    uint sequence;
+    uint reversed;
+    uint input_nb1;
+    uint weight_nb1;
+    uint dst_nb1;
+} p;
+
+layout(binding = 0) readonly buffer InputGates { float input_gates[]; };
+layout(binding = 1) readonly buffer RecurrentWeights { float recurrent_weights[]; };
+layout(binding = 2) readonly buffer RecurrentBiases { float recurrent_biases[]; };
+layout(binding = 3) readonly buffer H0 { float h0[]; };
+layout(binding = 4) readonly buffer C0 { float c0[]; };
+layout(binding = 5) writeonly buffer Dst { float dst[]; };
+
+shared float h[256];
+shared float c[256];
+shared float next_h[256];
+shared float next_c[256];
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+void main() {
+    const uint j = gl_LocalInvocationID.x;
+
+    if (j < p.hidden) {
+        h[j] = h0[j];
+        c[j] = c0[j];
+    }
+    barrier();
+
+    for (uint step = 0; step < p.sequence; ++step) {
+        const uint t = p.reversed != 0 ? (p.sequence - 1 - step) : step;
+
+        if (j < p.hidden) {
+            float gate_values[4];
+            for (uint gate = 0; gate < 4; ++gate) {
+                const uint row = gate * p.hidden + j;
+                float value = input_gates[row + t * p.input_nb1] + recurrent_biases[row];
+                for (uint k = 0; k < p.hidden; ++k) {
+                    value += recurrent_weights[k + row * p.weight_nb1] * h[k];
+                }
+                gate_values[gate] = value;
+            }
+
+            const float i = sigmoid(gate_values[0]);
+            const float f = sigmoid(gate_values[1]);
+            const float g = tanh(gate_values[2]);
+            const float o = sigmoid(gate_values[3]);
+            const float c_val = f * c[j] + i * g;
+
+            next_c[j] = c_val;
+            next_h[j] = tanh(c_val) * o;
+            dst[j + t * p.dst_nb1] = next_h[j];
+        }
+
+        barrier();
+        if (j < p.hidden) {
+            h[j] = next_h[j];
+            c[j] = next_c[j];
+        }
+        barrier();
+    }
+}

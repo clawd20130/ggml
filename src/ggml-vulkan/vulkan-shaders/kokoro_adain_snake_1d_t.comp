@@ -1,0 +1,78 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint output_length;
+    uint channels;
+    uint batch;
+    uint input_nb0;
+    uint input_nb1;
+    uint input_nb2;
+    uint alpha_ne0;
+    uint alpha_ne1;
+    uint alpha_nb0;
+    uint alpha_nb1;
+    uint gamma_ne0;
+    uint gamma_ne1;
+    uint gamma_nb0;
+    uint gamma_nb1;
+    uint beta_ne0;
+    uint beta_ne1;
+    uint beta_nb0;
+    uint beta_nb1;
+} p;
+
+layout(binding = 0) readonly buffer Alpha { float alpha[]; };
+layout(binding = 1) readonly buffer Input { float input_data[]; };
+layout(binding = 2) readonly buffer Gamma { float gamma_data[]; };
+layout(binding = 3) readonly buffer Beta { float beta_data[]; };
+layout(binding = 4) writeonly buffer Dst { float dst[]; };
+
+float channel_value_alpha(uint channel) {
+    if (p.alpha_ne0 == 1 && p.alpha_ne1 == 1) {
+        return alpha[0];
+    }
+    if (p.alpha_ne0 > channel) {
+        return alpha[channel * p.alpha_nb0];
+    }
+    return alpha[channel * p.alpha_nb1];
+}
+
+float channel_value_gamma(uint channel) {
+    if (p.gamma_ne0 == 1 && p.gamma_ne1 == 1) {
+        return gamma_data[0];
+    }
+    if (p.gamma_ne0 > channel) {
+        return gamma_data[channel * p.gamma_nb0];
+    }
+    return gamma_data[channel * p.gamma_nb1];
+}
+
+float channel_value_beta(uint channel) {
+    if (p.beta_ne0 == 1 && p.beta_ne1 == 1) {
+        return beta_data[0];
+    }
+    if (p.beta_ne0 > channel) {
+        return beta_data[channel * p.beta_nb0];
+    }
+    return beta_data[channel * p.beta_nb1];
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint total = p.output_length * p.channels * p.batch;
+    if (idx >= total) {
+        return;
+    }
+
+    const uint l = idx % p.output_length;
+    const uint c = (idx / p.output_length) % p.channels;
+    const uint n = idx / (p.output_length * p.channels);
+
+    const float in_value = input_data[c * p.input_nb0 + l * p.input_nb1 + n * p.input_nb2];
+    const float x = in_value + in_value * channel_value_gamma(c) + channel_value_beta(c);
+    const float a = channel_value_alpha(c);
+    const float s = sin(x * a);
+    dst[idx] = x + s * s / a;
+}

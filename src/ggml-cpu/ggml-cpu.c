@@ -1844,6 +1844,22 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_set(params, tensor);
             } break;
+        case GGML_OP_STFT:
+            {
+                ggml_compute_forward_stft(params, tensor);
+            } break;
+        case GGML_OP_AA_STFT:
+            {
+                ggml_compute_forward_abs_angle_stft(params, tensor);
+            } break;
+        case GGML_OP_ISTFT:
+            {
+                ggml_compute_forward_istft(params, tensor);
+            } break;
+        case GGML_OP_AA_ISTFT:
+            {
+                ggml_compute_forward_abs_angle_istft(params, tensor);
+            } break;
         case GGML_OP_CPY:
             {
                 ggml_compute_forward_cpy(params, tensor);
@@ -2051,6 +2067,26 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_gated_delta_net(params, tensor);
             } break;
+        case GGML_OP_KOKORO_LSTM_SCAN:
+            {
+                ggml_compute_forward_kokoro_lstm_scan(params, tensor);
+            } break;
+        case GGML_OP_KOKORO_LSTM_STEP:
+            {
+                ggml_compute_forward_kokoro_lstm_step(params, tensor);
+            } break;
+        case GGML_OP_KOKORO_CONV_1D:
+            {
+                ggml_compute_forward_kokoro_conv_1d(params, tensor);
+            } break;
+        case GGML_OP_KOKORO_SNAKE_1D_T:
+            {
+                ggml_compute_forward_kokoro_snake_1d_t(params, tensor);
+            } break;
+        case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
+            {
+                ggml_compute_forward_kokoro_adain_snake_1d_t(params, tensor);
+            } break;
         case GGML_OP_MAP_CUSTOM1:
             {
                 ggml_compute_forward_map_custom1(params, tensor);
@@ -2231,6 +2267,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
+        case GGML_OP_KOKORO_LSTM_STEP:
+        case GGML_OP_KOKORO_CONV_1D:
+        case GGML_OP_KOKORO_SNAKE_1D_T:
+        case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
             {
                 n_tasks = n_threads;
             } break;
@@ -2350,6 +2390,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_COL2IM_1D:
         case GGML_OP_CONV_TRANSPOSE_1D:
         case GGML_OP_CONV_TRANSPOSE_2D:
+        case GGML_OP_STFT:
+        case GGML_OP_AA_STFT:
+        case GGML_OP_ISTFT:
+        case GGML_OP_AA_ISTFT:
             {
                 n_tasks = n_threads;
             } break;
@@ -2384,6 +2428,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_WIN_PART:
         case GGML_OP_WIN_UNPART:
         case GGML_OP_GET_REL_POS:
+        case GGML_OP_KOKORO_LSTM_SCAN:
             {
                 n_tasks = 1;
             } break;
@@ -2903,6 +2948,16 @@ struct ggml_cplan ggml_graph_plan(
                         cur += ggml_type_size(node->src[0]->type) * ne10 * ne11 * ne12;
 
                     } break;
+                case GGML_OP_STFT:
+                case GGML_OP_AA_STFT:
+                    {
+                        cur = ggml_type_size(node->type) * (n_threads + node->ne[0] * n_threads * 2);
+                    } break;
+                case GGML_OP_ISTFT:
+                case GGML_OP_AA_ISTFT:
+                    {
+                        cur = ggml_type_size(node->type) * (n_tasks + node->ne[0] * n_tasks * 4);
+                    } break;
                 case GGML_OP_TOP_K:
                     {
                         cur += sizeof(int32_t)*node->src[0]->ne[0]*n_tasks;
@@ -2951,6 +3006,17 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t K   = ggml_get_op_params_i32(node, 0);
                         const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
                         cur = per_thread * sizeof(float) * n_tasks;
+                    } break;
+                case GGML_OP_KOKORO_LSTM_SCAN:
+                    {
+                        cur = sizeof(float) * node->ne[0] * 4;
+                    } break;
+                case GGML_OP_KOKORO_LSTM_STEP:
+                case GGML_OP_KOKORO_CONV_1D:
+                case GGML_OP_KOKORO_SNAKE_1D_T:
+                case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
+                    {
+                        cur = 0;
                     } break;
                 case GGML_OP_COUNT:
                     {

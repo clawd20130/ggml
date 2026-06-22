@@ -2,97 +2,99 @@
 
 #include "types.glsl"
 
-layout (binding = 0) readonly buffer A {A_TYPE data_a[];};   // src0 - kernel:    [K, Cout, Cin]
-layout (binding = 1) readonly buffer B {B_TYPE data_b[];};   // src1 - input:     [L, Cin]
-layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};     // dst - result      [KL, Cout]
+layout (binding = 0) readonly buffer A {A_TYPE data_a[];};   // kernel: [K, Cout, Cin]
+layout (binding = 1) readonly buffer B {B_TYPE data_b[];};   // input:  [L, Cin]
+layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};  // output: [T, Cout]
 
-layout(local_size_x = 128 , local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout (push_constant) uniform parameter {
     uint32_t Cout;
     uint32_t Cin;
     uint32_t K;
     uint32_t L;
-    uint32_t KL;
-
+    uint32_t T;
     uint32_t nb01;
     uint32_t nb02;
     uint32_t nb11;
     uint32_t nb1;
-
     int32_t s0;
+    int32_t p0;
+    uint32_t g0;
 } p;
 
-
-uint32_t Cout_idx = gl_WorkGroupID.x;
-const uint32_t bs = gl_WorkGroupSize.x;
-uint32_t tid = gl_LocalInvocationID.x;
-// Code is more straightforward if we assume it is bs*s0+K instead of (bs-1)*s0+K.
-uint32_t tmp_len = bs*p.s0+p.K;
-shared D_TYPE tmp[4096];
-
-uint splitWork(uint workSize){
-    return (bs + workSize -1) / bs;
+int floor_div_pos_den(int n, int d) {
+    if (n >= 0) {
+        return n / d;
+    }
+    return -((-n + d - 1) / d);
 }
 
-void main(){
-    for(uint32_t i = 0; i < splitWork(tmp_len); i++){
-        uint32_t idx = i*bs+tid;
-        if(idx < tmp_len){
-            tmp[idx] = 0.0;
+int ceil_div_pos_den(int n, int d) {
+    if (n >= 0) {
+        return (n + d - 1) / d;
+    }
+    return -((-n) / d);
+}
+
+void main() {
+    const uint32_t out_t = gl_GlobalInvocationID.x;
+    const uint32_t out_channel = gl_WorkGroupID.y;
+
+    if (out_t >= p.T) {
+        return;
+    }
+
+    const uint32_t channels_per_group = p.Cin / p.g0;
+    const bool dense_group = p.g0 == 1;
+    const uint32_t out_group = dense_group ? 0 : out_channel / p.Cout;
+    const uint32_t out_channel_in_group = dense_group ? out_channel : out_channel - out_group * p.Cout;
+    const uint32_t input_start = dense_group ? out_channel / channels_per_group : out_group * channels_per_group;
+    float sum = 0.0;
+
+    if (dense_group && out_channel >= p.Cout) {
+        return;
+    }
+
+    const int32_t stride = p.s0;
+    if (stride <= 0) {
+        return;
+    }
+
+    const int32_t low = int32_t(out_t) + p.p0 - int32_t(p.K) + 1;
+    const int32_t high = int32_t(out_t) + p.p0;
+    int32_t in_t_start = ceil_div_pos_den(low, stride);
+    int32_t in_t_end = floor_div_pos_den(high, stride);
+    in_t_start = max(in_t_start, 0);
+    in_t_end = min(in_t_end, int32_t(p.L) - 1);
+
+    for (int32_t in_t_i = in_t_start; in_t_i <= in_t_end; ++in_t_i) {
+        const uint32_t in_t = uint32_t(in_t_i);
+        const int32_t kernel_t = int32_t(out_t) - int32_t(in_t) * p.s0 + p.p0;
+        if (kernel_t < 0 || kernel_t >= int32_t(p.K)) {
+            continue;
+        }
+
+        for (uint32_t ci = 0; ci < channels_per_group; ++ci) {
+            uint32_t input_t = in_t;
+            uint32_t input_channel = input_start + ci;
+            if (dense_group) {
+                const uint32_t input_linear = in_t * p.Cin + input_channel;
+                if (input_linear >= p.L * p.Cin) {
+                    continue;
+                }
+                input_t = input_linear / p.Cin;
+                input_channel = input_linear - input_t * p.Cin;
+            } else if (out_group >= p.g0 || input_channel >= p.Cin) {
+                continue;
+            }
+
+            const uint32_t kernel_channel = dense_group ? ci : input_channel;
+            const float k = float(data_a[uint32_t(kernel_t) + out_channel_in_group * p.nb01 + kernel_channel * p.nb02]);
+            const float x = float(data_b[input_t + input_channel * p.nb11]);
+            sum += k * x;
         }
     }
 
-    uint32_t L_blocks = splitWork(p.L);
-    for(uint32_t L_block_id = 0; L_block_id < L_blocks; L_block_id++){
-        if(L_block_id > 0){
-            barrier();
-            // Shift values in tmp to the current processing window
-            for(int i = 0; i < splitWork(tmp_len); i++){
-                uint32_t idx = i*bs+tid;
-                if(idx >= bs*p.s0 && idx < tmp_len){
-                    tmp[idx-bs*p.s0] = tmp[idx];
-                    tmp[idx] = 0.0;
-                }else if(idx >= p.K && idx < bs*p.s0){
-                    tmp[idx] = 0.0;
-                }
-            }
-        }
-        barrier();
-
-        // Save contributions of the block to tmp
-        uint32_t L_idx = L_block_id*bs + tid;
-        for(uint32_t K_idx = 0; K_idx < p.K; K_idx++){
-            D_TYPE dp = 0.0;
-            for(uint32_t Cin_idx = 0; Cin_idx < p.Cin; Cin_idx++){
-                A_TYPE elemKrn = data_a[K_idx + Cout_idx * p.nb01 + Cin_idx * p.nb02];
-                if(L_idx < p.L){
-                    B_TYPE elemInp = data_b[L_idx + Cin_idx*p.nb11];
-                    dp = fma(elemKrn, elemInp, dp);
-                }
-            }
-            tmp[tid*p.s0 + K_idx] += dp;
-            barrier();
-        }
-
-        // Save the computed values except the last block that can have different size
-        uint32_t KLb_idx = L_block_id*bs*p.s0;
-        if(L_block_id < L_blocks-1){
-            for(uint32_t s0_idx = 0; s0_idx < p.s0; s0_idx++){
-                uint32_t sh_idx = p.s0*tid+s0_idx;
-                uint32_t KL_idx = KLb_idx+sh_idx;
-                if(KL_idx < p.KL){
-                    data_d[KL_idx + Cout_idx*p.nb1] = tmp[sh_idx];
-                }
-            }
-        }
-    }
-
-    for(uint32_t i = 0; i < splitWork(tmp_len); i++){
-        uint32_t idx = i*bs+tid;
-        uint32_t KL_idx = (L_blocks-1)*bs*p.s0+idx;
-        if(KL_idx < p.KL){
-            data_d[KL_idx + Cout_idx*p.nb1] = tmp[idx];
-        }
-    }
+    data_d[out_t + out_channel * p.nb1] = D_TYPE(sum);
 }

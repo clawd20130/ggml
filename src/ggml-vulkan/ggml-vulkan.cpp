@@ -818,6 +818,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_cpy_f32_quant[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_quant_f32[GGML_TYPE_COUNT];
     vk_pipeline pipeline_cpy_transpose_16, pipeline_cpy_transpose_32;
+    vk_pipeline pipeline_transpose_cont_2d_f32;
     vk_pipeline pipeline_set_rows_i32[GGML_TYPE_COUNT];
     vk_pipeline pipeline_set_rows_i64[GGML_TYPE_COUNT];
     vk_pipeline pipeline_norm_f32;
@@ -902,12 +903,21 @@ struct vk_device_struct {
     vk_pipeline pipeline_im2col_3d_f32, pipeline_im2col_3d_f32_f16;
     vk_pipeline pipeline_timestep_embedding_f32;
     vk_pipeline pipeline_conv_transpose_1d_f32;
+    vk_pipeline pipeline_stft_f32;
+    vk_pipeline pipeline_aa_stft_f32;
+    vk_pipeline pipeline_istft_f32;
+    vk_pipeline pipeline_aa_istft_f32;
     vk_pipeline pipeline_col2im_1d_f32;
     vk_pipeline pipeline_col2im_1d_f16;
     vk_pipeline pipeline_col2im_1d_bf16;
     vk_pipeline pipeline_snake_f32;
     vk_pipeline pipeline_snake_f16;
     vk_pipeline pipeline_snake_bf16;
+    vk_pipeline pipeline_kokoro_lstm_scan_f32;
+    vk_pipeline pipeline_kokoro_lstm_step_f32;
+    vk_pipeline pipeline_kokoro_conv_1d_f32;
+    vk_pipeline pipeline_kokoro_snake_1d_t_f32;
+    vk_pipeline pipeline_kokoro_adain_snake_1d_t_f32;
     vk_pipeline pipeline_pool2d_f32;
     vk_pipeline pipeline_rwkv_wkv6_f32;
     vk_pipeline pipeline_rwkv_wkv7_f32;
@@ -1237,6 +1247,15 @@ struct vk_op_unary_push_constants {
     uint32_t ne1_012mp; uint32_t ne1_01mp; uint32_t ne1_0mp; uint32_t ne1_Ls;
 };
 static_assert(sizeof(vk_op_unary_push_constants) <= 128, "sizeof(vk_op_unary_push_constants) must be <= 128");
+
+struct vk_op_transpose_cont_2d_push_constants {
+    uint32_t ne;
+    uint32_t ne00; uint32_t ne01; uint32_t ne02; uint32_t ne03; uint32_t nb00; uint32_t nb01; uint32_t nb02; uint32_t nb03;
+    uint32_t ne10; uint32_t ne11; uint32_t ne12; uint32_t ne13; uint32_t nb10; uint32_t nb11; uint32_t nb12; uint32_t nb13;
+    uint32_t a_offset;
+    uint32_t d_offset;
+};
+static_assert(sizeof(vk_op_transpose_cont_2d_push_constants) <= 128, "sizeof(vk_op_transpose_cont_2d_push_constants) must be <= 128");
 
 static vk_op_unary_push_constants vk_op_unary_push_constants_init(const ggml_tensor * src0, const ggml_tensor * dst, int64_t ne = 0) {
     GGML_ASSERT(ne != 0 || (ggml_nelements(src0) == ggml_nelements(dst)));
@@ -1570,19 +1589,113 @@ struct vk_op_conv_transpose_1d_push_constants {
     uint32_t Cin;
     uint32_t K;
     uint32_t L;
-    uint32_t KL;
-
+    uint32_t T;
     uint32_t nb01;
     uint32_t nb02;
     uint32_t nb11;
     uint32_t nb1;
-
     int32_t s0;
+    int32_t p0;
+    uint32_t g0;
+};
+
+struct vk_op_stft_push_constants {
+    uint32_t ne;
+    uint32_t n_fft;
+    uint32_t hop;
+    uint32_t src0_ne0; uint32_t src0_ne1;
+    uint32_t src0_nb0; uint32_t src0_nb1;
+    uint32_t src1_nb0;
+    uint32_t dst_ne0; uint32_t dst_ne1; uint32_t dst_ne2; uint32_t dst_ne3;
+    uint32_t dst_nb0; uint32_t dst_nb1; uint32_t dst_nb2; uint32_t dst_nb3;
+};
+
+struct vk_op_istft_push_constants {
+    uint32_t ne;
+    uint32_t n_fft;
+    uint32_t hop;
+    uint32_t src0_ne0; uint32_t src0_ne1; uint32_t src0_ne2; uint32_t src0_ne3;
+    uint32_t src0_nb0; uint32_t src0_nb1; uint32_t src0_nb2; uint32_t src0_nb3;
+    uint32_t src1_nb0;
+    uint32_t dst_ne0; uint32_t dst_ne1;
+    uint32_t dst_nb0; uint32_t dst_nb1;
 };
 
 struct vk_op_snake_push_constants {
     uint32_t ne0;
     uint32_t ne1;
+};
+
+struct vk_op_kokoro_lstm_scan_push_constants {
+    uint32_t hidden;
+    uint32_t sequence;
+    uint32_t reversed;
+    uint32_t input_nb1;
+    uint32_t weight_nb1;
+    uint32_t dst_nb1;
+};
+
+struct vk_op_kokoro_lstm_step_push_constants {
+    uint32_t hidden;
+    uint32_t input_nb0;
+    uint32_t linear_nb0;
+    uint32_t bias_nb0;
+    uint32_t c_nb0;
+    uint32_t dst_nb0;
+    uint32_t dst_nb1;
+};
+
+struct vk_op_kokoro_conv_1d_push_constants {
+    uint32_t output_length;
+    uint32_t out_channels;
+    uint32_t in_channels;
+    uint32_t batch;
+    uint32_t kernel;
+    uint32_t input_length;
+    int32_t s0;
+    int32_t p0;
+    int32_t d0;
+    uint32_t input_nb0;
+    uint32_t input_nb1;
+    uint32_t input_nb2;
+    uint32_t weight_nb1;
+    uint32_t weight_nb2;
+    uint32_t dst_nb1;
+    uint32_t dst_nb2;
+};
+
+struct vk_op_kokoro_snake_1d_t_push_constants {
+    uint32_t length;
+    uint32_t channels;
+    uint32_t batch;
+    uint32_t input_nb0;
+    uint32_t input_nb1;
+    uint32_t input_nb2;
+    uint32_t alpha_ne0;
+    uint32_t alpha_ne1;
+    uint32_t alpha_nb0;
+    uint32_t alpha_nb1;
+};
+
+struct vk_op_kokoro_adain_snake_1d_t_push_constants {
+    uint32_t length;
+    uint32_t channels;
+    uint32_t batch;
+    uint32_t input_nb0;
+    uint32_t input_nb1;
+    uint32_t input_nb2;
+    uint32_t alpha_ne0;
+    uint32_t alpha_ne1;
+    uint32_t alpha_nb0;
+    uint32_t alpha_nb1;
+    uint32_t gamma_ne0;
+    uint32_t gamma_ne1;
+    uint32_t gamma_nb0;
+    uint32_t gamma_nb1;
+    uint32_t beta_ne0;
+    uint32_t beta_ne1;
+    uint32_t beta_nb0;
+    uint32_t beta_nb1;
 };
 
 struct vk_op_pool2d_push_constants {
@@ -4939,6 +5052,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_32, "cpy_transpose_32", cpy_transpose_32_len, cpy_transpose_32_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_transpose_16, "cpy_transpose_16", cpy_transpose_16_len, cpy_transpose_16_data, "main", 2, sizeof(vk_op_unary_push_constants), {1, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_transpose_cont_2d_f32, "transpose_cont_2d_f32", transpose_cont_2d_f32_len, transpose_cont_2d_f32_data, "main", 2, sizeof(vk_op_transpose_cont_2d_push_constants), {16, 16, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_quant[GGML_TYPE_Q1_0], "cpy_f32_q1_0", cpy_f32_q1_0_len, cpy_f32_q1_0_data, "main", 2, sizeof(vk_op_unary_push_constants), {32, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_cpy_f32_quant[GGML_TYPE_Q4_0], "cpy_f32_q4_0", cpy_f32_q4_0_len, cpy_f32_q4_0_data, "main", 2, sizeof(vk_op_unary_push_constants), {32, 1, 1}, {}, 1);
@@ -5217,7 +5331,11 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
 
-    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_1d_f32, "conv_transpose_1d_f32", conv_transpose_1d_f32_len, conv_transpose_1d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_1d_push_constants), {1, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_conv_transpose_1d_f32, "conv_transpose_1d_f32", conv_transpose_1d_f32_len, conv_transpose_1d_f32_data, "main", 3, sizeof(vk_op_conv_transpose_1d_push_constants), {128, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_stft_f32, "stft_f32", stft_f32_len, stft_f32_data, "main", 3, sizeof(vk_op_stft_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_aa_stft_f32, "aa_stft_f32", aa_stft_f32_len, aa_stft_f32_data, "main", 3, sizeof(vk_op_stft_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_istft_f32, "istft_f32", istft_f32_len, istft_f32_data, "main", 3, sizeof(vk_op_istft_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_aa_istft_f32, "aa_istft_f32", aa_istft_f32_len, aa_istft_f32_data, "main", 3, sizeof(vk_op_istft_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_f32,  "col2im_1d_f32",  col2im_1d_f32_len,  col2im_1d_f32_data,  "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_f16,  "col2im_1d_f16",  col2im_1d_f16_len,  col2im_1d_f16_data,  "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
     ggml_vk_create_pipeline(device, device->pipeline_col2im_1d_bf16, "col2im_1d_bf16", col2im_1d_bf16_len, col2im_1d_bf16_data, "main", 2, sizeof(vk_op_col2im_1d_push_constants), {256, 1, 1}, {}, 1, true);
@@ -5225,6 +5343,12 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_snake_f32,  "snake_f32",  snake_f32_len,  snake_f32_data,  "main", 4, sizeof(vk_op_snake_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_snake_f16,  "snake_f16",  snake_f16_len,  snake_f16_data,  "main", 4, sizeof(vk_op_snake_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_snake_bf16, "snake_bf16", snake_bf16_len, snake_bf16_data, "main", 4, sizeof(vk_op_snake_push_constants), {256, 1, 1}, {}, 1);
+
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_lstm_scan_f32, "kokoro_lstm_scan_f32", kokoro_lstm_scan_f32_len, kokoro_lstm_scan_f32_data, "main", 6, sizeof(vk_op_kokoro_lstm_scan_push_constants), {1, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_lstm_step_f32, "kokoro_lstm_step_f32", kokoro_lstm_step_f32_len, kokoro_lstm_step_f32_data, "main", 5, sizeof(vk_op_kokoro_lstm_step_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_f32, "kokoro_conv_1d_f32", kokoro_conv_1d_f32_len, kokoro_conv_1d_f32_data, "main", 3, sizeof(vk_op_kokoro_conv_1d_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_snake_1d_t_f32, "kokoro_snake_1d_t_f32", kokoro_snake_1d_t_f32_len, kokoro_snake_1d_t_f32_data, "main", 3, sizeof(vk_op_kokoro_snake_1d_t_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_adain_snake_1d_t_f32, "kokoro_adain_snake_1d_t_f32", kokoro_adain_snake_1d_t_f32_len, kokoro_adain_snake_1d_t_f32_data, "main", 5, sizeof(vk_op_kokoro_adain_snake_1d_t_push_constants), {256, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_pool2d_f32, "pool2d_f32", pool2d_f32_len, pool2d_f32_data, "main", 2, sizeof(vk_op_pool2d_push_constants), {512, 1, 1}, {}, 1);
 
@@ -7316,6 +7440,18 @@ static vk_subbuffer ggml_vk_tensor_subbuffer(
 
     size_t misalign_bytes = offset & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
     // The shader must support misaligned offsets when indexing into the buffer
+    if (!allow_misalign && misalign_bytes != 0) {
+        std::cerr << "ggml_vulkan: misaligned tensor name=" << tensor->name
+                  << " op=" << ggml_op_name(tensor->op)
+                  << " type=" << ggml_type_name(tensor->type)
+                  << " offset=" << offset
+                  << " view_offs=" << tensor->view_offs
+                  << " misalign=" << misalign_bytes
+                  << " alignment=" << ctx->device->properties.limits.minStorageBufferOffsetAlignment
+                  << " ne=[" << tensor->ne[0] << "," << tensor->ne[1] << "," << tensor->ne[2] << "," << tensor->ne[3] << "]"
+                  << " nb=[" << tensor->nb[0] << "," << tensor->nb[1] << "," << tensor->nb[2] << "," << tensor->nb[3] << "]"
+                  << std::endl;
+    }
     GGML_ASSERT(allow_misalign || misalign_bytes == 0);
     offset &= ~misalign_bytes;
     size += misalign_bytes;
@@ -10739,6 +10875,26 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             return ctx->device->pipeline_conv_transpose_1d_f32;
         }
         return nullptr;
+    case GGML_OP_STFT:
+        if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_stft_f32;
+        }
+        return nullptr;
+    case GGML_OP_AA_STFT:
+        if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_aa_stft_f32;
+        }
+        return nullptr;
+    case GGML_OP_ISTFT:
+        if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_istft_f32;
+        }
+        return nullptr;
+    case GGML_OP_AA_ISTFT:
+        if (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_aa_istft_f32;
+        }
+        return nullptr;
     case GGML_OP_COL2IM_1D:
         switch (src0->type) {
             case GGML_TYPE_F32:  return ctx->device->pipeline_col2im_1d_f32;
@@ -11190,11 +11346,25 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         } break;
     case GGML_OP_CONV_TRANSPOSE_1D:
         {
-            elements = {uint32_t(src0->ne[1]), 1, 1}; // parallelize in {Cout, 1, 1}
+            elements = { (uint32_t)dst->ne[0], (uint32_t)dst->ne[1], 1 };
         } break;
     case GGML_OP_COL2IM_1D:
         {
             elements = { uint32_t(dst->ne[0]), uint32_t(dst->ne[1]), 1 };
+        } break;
+    case GGML_OP_STFT:
+    case GGML_OP_AA_STFT:
+    case GGML_OP_ISTFT:
+    case GGML_OP_AA_ISTFT:
+        {
+            const uint32_t ne = ggml_nelements(dst);
+            if (ne > 65536) {
+                elements = { 256, 256, CEIL_DIV(ne, 65536) };
+            } else if (ne > 256) {
+                elements = { 256, CEIL_DIV(ne, 256), 1 };
+            } else {
+                elements = { ne, 1, 1 };
+            }
         } break;
     case GGML_OP_POOL_2D:
         {
@@ -12043,7 +12213,69 @@ static void ggml_vk_repeat_back(ggml_backend_vk_context * ctx, vk_context& subct
     ggml_vk_op_f32(ctx, subctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_REPEAT_BACK, std::move(p));
 }
 
+static bool ggml_vk_can_transpose_cont_2d_f32(const ggml_tensor * src0, const ggml_tensor * dst) {
+    static const bool disabled = std::getenv("GGML_VK_DISABLE_TRANSPOSE_CONT_2D") != nullptr;
+    if (disabled) {
+        return false;
+    }
+    if (dst->op != GGML_OP_CONT || src0->op != GGML_OP_TRANSPOSE) {
+        return false;
+    }
+    if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->ne[2] != 1 || src0->ne[3] != 1 || dst->ne[2] != 1 || dst->ne[3] != 1) {
+        return false;
+    }
+    if (src0->ne[0] != dst->ne[0] || src0->ne[1] != dst->ne[1]) {
+        return false;
+    }
+    if (src0->ne[0] <= 0 || src0->ne[1] <= 0 ||
+        src0->ne[0] > UINT32_MAX || src0->ne[1] > UINT32_MAX) {
+        return false;
+    }
+
+    const size_t type_size = sizeof(float);
+    if (src0->nb[1] != type_size || src0->nb[0] != type_size * (size_t)src0->ne[1]) {
+        return false;
+    }
+    if (dst->nb[0] != type_size || dst->nb[1] != type_size * (size_t)dst->ne[0]) {
+        return false;
+    }
+    return true;
+}
+
+static void ggml_vk_transpose_cont_2d_f32(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+    vk_pipeline pipeline = ctx->device->pipeline_transpose_cont_2d_f32;
+    GGML_ASSERT(pipeline != nullptr);
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+
+    vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0, true);
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
+
+    const vk_op_transpose_cont_2d_push_constants pc = {
+        (uint32_t)ggml_nelements(dst),
+        (uint32_t)src0->ne[0], (uint32_t)src0->ne[1], 1, 1,
+        (uint32_t)(src0->nb[0] / sizeof(float)), (uint32_t)(src0->nb[1] / sizeof(float)), 0, 0,
+        (uint32_t) dst->ne[0], (uint32_t) dst->ne[1], 1, 1,
+        (uint32_t)( dst->nb[0] / sizeof(float)), (uint32_t)( dst->nb[1] / sizeof(float)), 0, 0,
+        (uint32_t)(get_misalign_bytes(ctx, src0) / sizeof(float)),
+        (uint32_t)(get_misalign_bytes(ctx, dst)  / sizeof(float)),
+    };
+
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+        { src0_buf, dst_buf },
+        pc,
+        { (uint32_t)src0->ne[1], (uint32_t)src0->ne[0], 1 });
+}
+
 static void ggml_vk_cpy(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+    if (ggml_vk_can_transpose_cont_2d_f32(src0, dst)) {
+        ggml_vk_transpose_cont_2d_f32(ctx, subctx, src0, dst);
+        return;
+    }
+
     uint32_t ne = (uint32_t)ggml_nelements(src0);
     if (ggml_is_quantized(src0->type) && ggml_is_quantized(dst->type)) {
         // Convert from number of logical elements to 2- or 4-byte units.
@@ -12969,20 +13201,70 @@ static void ggml_vk_conv_transpose_1d(ggml_backend_vk_context * ctx, vk_context&
     GGML_ASSERT(nb10 == sizeof(float));
 
     const int32_t s0 = dst->op_params[0];
+    const int32_t p0 = dst->op_params[1];
+    const uint32_t g0 = dst->op_params[4];
 
     vk_op_conv_transpose_1d_push_constants p{};
     p.Cout = static_cast<uint32_t>(ne01);
     p.Cin = static_cast<uint32_t>(ne02);
     p.K = static_cast<uint32_t>(ne00);
     p.L = static_cast<uint32_t>(ne10);
-    p.KL = static_cast<uint32_t>(ne0);
+    p.T = static_cast<uint32_t>(ne0);
     p.nb01 = static_cast<uint32_t>(nb01 / nb00);
     p.nb02 = static_cast<uint32_t>(nb02 / nb00);
     p.nb11 = static_cast<uint32_t>(nb11 / nb10);
     p.nb1 = static_cast<uint32_t>(nb1 / nb0);
-    p.s0 = static_cast<uint32_t>(s0);
+    p.s0 = s0;
+    p.p0 = p0;
+    p.g0 = g0;
 
     ggml_vk_op_f32(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_CONV_TRANSPOSE_1D, std::move(p));
+}
+
+static void ggml_vk_stft(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const uint32_t src0_type_size = ggml_type_size(src0->type);
+    const uint32_t src1_type_size = ggml_type_size(src1->type);
+    const uint32_t dst_type_size = ggml_type_size(dst->type);
+    const uint32_t n_fft = ((const int32_t *)dst->op_params)[0];
+    const uint32_t hop = ((const int32_t *)dst->op_params)[1];
+
+    ggml_vk_op_f32<vk_op_stft_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, dst->op, {
+        (uint32_t)ggml_nelements(dst),
+        n_fft,
+        hop,
+        (uint32_t)src0->ne[0], (uint32_t)src0->ne[1],
+        (uint32_t)src0->nb[0] / src0_type_size, (uint32_t)src0->nb[1] / src0_type_size,
+        (uint32_t)src1->nb[0] / src1_type_size,
+        (uint32_t)dst->ne[0], (uint32_t)dst->ne[1], (uint32_t)dst->ne[2], (uint32_t)dst->ne[3],
+        (uint32_t)dst->nb[0] / dst_type_size, (uint32_t)dst->nb[1] / dst_type_size, (uint32_t)dst->nb[2] / dst_type_size, (uint32_t)dst->nb[3] / dst_type_size,
+    });
+}
+
+static void ggml_vk_istft(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const uint32_t src0_type_size = ggml_type_size(src0->type);
+    const uint32_t src1_type_size = ggml_type_size(src1->type);
+    const uint32_t dst_type_size = ggml_type_size(dst->type);
+    const uint32_t n_fft = ((const int32_t *)dst->op_params)[0];
+    const uint32_t hop = ((const int32_t *)dst->op_params)[1];
+
+    ggml_vk_op_f32<vk_op_istft_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, dst->op, {
+        (uint32_t)ggml_nelements(dst),
+        n_fft,
+        hop,
+        (uint32_t)src0->ne[0], (uint32_t)src0->ne[1], (uint32_t)src0->ne[2], (uint32_t)src0->ne[3],
+        (uint32_t)src0->nb[0] / src0_type_size, (uint32_t)src0->nb[1] / src0_type_size, (uint32_t)src0->nb[2] / src0_type_size, (uint32_t)src0->nb[3] / src0_type_size,
+        (uint32_t)src1->nb[0] / src1_type_size,
+        (uint32_t)dst->ne[0], (uint32_t)dst->ne[1],
+        (uint32_t)dst->nb[0] / dst_type_size, (uint32_t)dst->nb[1] / dst_type_size,
+    });
 }
 
 static void ggml_vk_col2im_1d(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
@@ -13048,6 +13330,310 @@ static void ggml_vk_snake_dispatch_fused(ggml_backend_vk_context * ctx, vk_conte
 
     std::array<uint32_t, 3> elements = { pc.ne0, pc.ne1, 1 };
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { x_buf, a_buf, inv_b_buf, dst_buf }, pc, elements);
+}
+
+static bool ggml_vk_kokoro_lstm_scan_supported(const ggml_tensor * op) {
+    const ggml_tensor * input_gates       = op->src[0];
+    const ggml_tensor * recurrent_weights = op->src[1];
+    const ggml_tensor * recurrent_biases  = op->src[2];
+    const ggml_tensor * h0                = op->src[3];
+    const ggml_tensor * c0                = op->src[4];
+
+    if (op->type != GGML_TYPE_F32 ||
+        input_gates == nullptr || recurrent_weights == nullptr || recurrent_biases == nullptr || h0 == nullptr || c0 == nullptr ||
+        input_gates->type != GGML_TYPE_F32 || recurrent_weights->type != GGML_TYPE_F32 || recurrent_biases->type != GGML_TYPE_F32 ||
+        h0->type != GGML_TYPE_F32 || c0->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(input_gates) || !ggml_is_contiguous(recurrent_weights) ||
+        !ggml_is_contiguous(recurrent_biases) || !ggml_is_contiguous(h0) || !ggml_is_contiguous(c0) ||
+        !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    const int64_t hidden = op->ne[0];
+    const int64_t sequence = op->ne[1];
+    return hidden > 0 && hidden <= 256 && sequence > 0 &&
+           h0->ne[0] == hidden && c0->ne[0] == hidden &&
+           input_gates->ne[0] == 4 * hidden && input_gates->ne[1] == sequence &&
+           recurrent_weights->ne[0] == hidden && recurrent_weights->ne[1] == 4 * hidden &&
+           recurrent_biases->ne[0] == 4 * hidden;
+}
+
+static void ggml_vk_kokoro_lstm_scan(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    GGML_ASSERT(dst->op == GGML_OP_KOKORO_LSTM_SCAN);
+    GGML_ASSERT(ggml_vk_kokoro_lstm_scan_supported(dst));
+
+    vk_pipeline pipeline = ctx->device->pipeline_kokoro_lstm_scan_f32;
+    if (pipeline == nullptr) {
+        GGML_ABORT("ggml_vulkan: missing Kokoro LSTM scan pipeline");
+    }
+
+    const ggml_tensor * input_gates       = dst->src[0];
+    const ggml_tensor * recurrent_weights = dst->src[1];
+
+    const vk_op_kokoro_lstm_scan_push_constants pc = {
+        (uint32_t)dst->ne[0],
+        (uint32_t)dst->ne[1],
+        (uint32_t)(ggml_get_op_params_i32(dst, 0) != 0),
+        (uint32_t)(input_gates->nb[1] / sizeof(float)),
+        (uint32_t)(recurrent_weights->nb[1] / sizeof(float)),
+        (uint32_t)(dst->nb[1] / sizeof(float)),
+    };
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
+        ggml_vk_tensor_subbuffer(ctx, dst->src[0], true),
+        ggml_vk_tensor_subbuffer(ctx, dst->src[1], true),
+        ggml_vk_tensor_subbuffer(ctx, dst->src[2], true),
+        ggml_vk_tensor_subbuffer(ctx, dst->src[3], true),
+        ggml_vk_tensor_subbuffer(ctx, dst->src[4], true),
+        ggml_vk_tensor_subbuffer(ctx, dst, true),
+    }, pc, {1, 1, 1});
+}
+
+static bool ggml_vk_kokoro_lstm_step_supported(const ggml_tensor * op) {
+    const ggml_tensor * input_gate_step  = op->src[0];
+    const ggml_tensor * recurrent_linear = op->src[1];
+    const ggml_tensor * recurrent_biases = op->src[2];
+    const ggml_tensor * c0               = op->src[3];
+
+    if (op->type != GGML_TYPE_F32 ||
+        input_gate_step == nullptr || recurrent_linear == nullptr || recurrent_biases == nullptr || c0 == nullptr ||
+        input_gate_step->type != GGML_TYPE_F32 || recurrent_linear->type != GGML_TYPE_F32 ||
+        recurrent_biases->type != GGML_TYPE_F32 || c0->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(input_gate_step) || !ggml_is_contiguous(recurrent_linear) ||
+        !ggml_is_contiguous(recurrent_biases) || !ggml_is_contiguous(c0) ||
+        !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    const int64_t hidden = op->ne[0];
+    return hidden > 0 &&
+           op->ne[1] == 2 &&
+           c0->ne[0] == hidden &&
+           input_gate_step->ne[0] == 4 * hidden &&
+           recurrent_linear->ne[0] == 4 * hidden &&
+           recurrent_biases->ne[0] == 4 * hidden;
+}
+
+static void ggml_vk_kokoro_lstm_step(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    GGML_ASSERT(dst->op == GGML_OP_KOKORO_LSTM_STEP);
+    GGML_ASSERT(ggml_vk_kokoro_lstm_step_supported(dst));
+
+    vk_pipeline pipeline = ctx->device->pipeline_kokoro_lstm_step_f32;
+    if (pipeline == nullptr) {
+        GGML_ABORT("ggml_vulkan: missing Kokoro LSTM step pipeline");
+    }
+
+    const ggml_tensor * input_gate_step  = dst->src[0];
+    const ggml_tensor * recurrent_linear = dst->src[1];
+    const ggml_tensor * recurrent_biases = dst->src[2];
+    const ggml_tensor * c0               = dst->src[3];
+
+    const vk_op_kokoro_lstm_step_push_constants pc = {
+        (uint32_t)dst->ne[0],
+        (uint32_t)(input_gate_step->nb[0] / sizeof(float)),
+        (uint32_t)(recurrent_linear->nb[0] / sizeof(float)),
+        (uint32_t)(recurrent_biases->nb[0] / sizeof(float)),
+        (uint32_t)(c0->nb[0] / sizeof(float)),
+        (uint32_t)(dst->nb[0] / sizeof(float)),
+        (uint32_t)(dst->nb[1] / sizeof(float)),
+    };
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
+        ggml_vk_tensor_subbuffer(ctx, input_gate_step, true),
+        ggml_vk_tensor_subbuffer(ctx, recurrent_linear, true),
+        ggml_vk_tensor_subbuffer(ctx, recurrent_biases, true),
+        ggml_vk_tensor_subbuffer(ctx, c0, true),
+        ggml_vk_tensor_subbuffer(ctx, dst, true),
+    }, pc, {(uint32_t)dst->ne[0], 1, 1});
+}
+
+static bool ggml_vk_kokoro_conv_1d_supported(const ggml_tensor * op) {
+    const ggml_tensor * weight = op->src[0];
+    const ggml_tensor * input  = op->src[1];
+
+    if (op->type != GGML_TYPE_F32 || weight == nullptr || input == nullptr ||
+        weight->type != GGML_TYPE_F32 || input->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(weight) || !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    return op->ne[0] > 0 && op->ne[1] == weight->ne[2] && op->ne[2] == input->ne[2] &&
+           weight->ne[0] > 0 && weight->ne[1] == input->ne[1] && input->ne[3] == 1;
+}
+
+static void ggml_vk_kokoro_conv_1d(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    GGML_ASSERT(dst->op == GGML_OP_KOKORO_CONV_1D);
+    GGML_ASSERT(ggml_vk_kokoro_conv_1d_supported(dst));
+
+    vk_pipeline pipeline = ctx->device->pipeline_kokoro_conv_1d_f32;
+    if (pipeline == nullptr) {
+        GGML_ABORT("ggml_vulkan: missing Kokoro Conv1D pipeline");
+    }
+
+    const ggml_tensor * weight = dst->src[0];
+    const ggml_tensor * input  = dst->src[1];
+
+    const vk_op_kokoro_conv_1d_push_constants pc = {
+        (uint32_t)dst->ne[0],
+        (uint32_t)dst->ne[1],
+        (uint32_t)weight->ne[1],
+        (uint32_t)dst->ne[2],
+        (uint32_t)weight->ne[0],
+        (uint32_t)input->ne[0],
+        ggml_get_op_params_i32(dst, 0),
+        ggml_get_op_params_i32(dst, 1),
+        ggml_get_op_params_i32(dst, 2),
+        (uint32_t)(input->nb[0] / sizeof(float)),
+        (uint32_t)(input->nb[1] / sizeof(float)),
+        (uint32_t)(input->nb[2] / sizeof(float)),
+        (uint32_t)(weight->nb[1] / sizeof(float)),
+        (uint32_t)(weight->nb[2] / sizeof(float)),
+        (uint32_t)(dst->nb[1] / sizeof(float)),
+        (uint32_t)(dst->nb[2] / sizeof(float)),
+    };
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
+        ggml_vk_tensor_subbuffer(ctx, weight, true),
+        ggml_vk_tensor_subbuffer(ctx, input, true),
+        ggml_vk_tensor_subbuffer(ctx, dst, true),
+    }, pc, {(uint32_t)ggml_nelements(dst), 1, 1});
+}
+
+static bool ggml_vk_kokoro_snake_1d_t_supported(const ggml_tensor * op) {
+    const ggml_tensor * alpha = op->src[0];
+    const ggml_tensor * input = op->src[1];
+
+    if (op->type != GGML_TYPE_F32 || alpha == nullptr || input == nullptr ||
+        alpha->type != GGML_TYPE_F32 || input->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(alpha) || !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    const int64_t channels = input->ne[0];
+    return op->ne[0] == input->ne[1] &&
+           op->ne[1] == channels &&
+           op->ne[2] == input->ne[2] &&
+           input->ne[3] == 1 &&
+           (ggml_nelements(alpha) == 1 || alpha->ne[0] == channels || alpha->ne[1] == channels);
+}
+
+static void ggml_vk_kokoro_snake_1d_t(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    GGML_ASSERT(dst->op == GGML_OP_KOKORO_SNAKE_1D_T);
+    GGML_ASSERT(ggml_vk_kokoro_snake_1d_t_supported(dst));
+
+    vk_pipeline pipeline = ctx->device->pipeline_kokoro_snake_1d_t_f32;
+    if (pipeline == nullptr) {
+        GGML_ABORT("ggml_vulkan: missing Kokoro Snake1D transpose pipeline");
+    }
+
+    const ggml_tensor * alpha = dst->src[0];
+    const ggml_tensor * input = dst->src[1];
+
+    const vk_op_kokoro_snake_1d_t_push_constants pc = {
+        (uint32_t)dst->ne[0],
+        (uint32_t)dst->ne[1],
+        (uint32_t)dst->ne[2],
+        (uint32_t)(input->nb[0] / sizeof(float)),
+        (uint32_t)(input->nb[1] / sizeof(float)),
+        (uint32_t)(input->nb[2] / sizeof(float)),
+        (uint32_t)alpha->ne[0],
+        (uint32_t)alpha->ne[1],
+        (uint32_t)(alpha->nb[0] / sizeof(float)),
+        (uint32_t)(alpha->nb[1] / sizeof(float)),
+    };
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
+        ggml_vk_tensor_subbuffer(ctx, alpha, true),
+        ggml_vk_tensor_subbuffer(ctx, input, true),
+        ggml_vk_tensor_subbuffer(ctx, dst, true),
+    }, pc, {(uint32_t)ggml_nelements(dst), 1, 1});
+}
+
+static bool ggml_vk_kokoro_adain_snake_1d_t_supported(const ggml_tensor * op) {
+    const ggml_tensor * alpha = op->src[0];
+    const ggml_tensor * input = op->src[1];
+    const ggml_tensor * gamma = op->src[2];
+    const ggml_tensor * beta  = op->src[3];
+
+    if (op->type != GGML_TYPE_F32 || alpha == nullptr || input == nullptr || gamma == nullptr || beta == nullptr ||
+        alpha->type != GGML_TYPE_F32 || input->type != GGML_TYPE_F32 ||
+        gamma->type != GGML_TYPE_F32 || beta->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous(alpha) || !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    const int64_t channels = input->ne[0];
+    return op->ne[0] == input->ne[1] &&
+           op->ne[1] == channels &&
+           op->ne[2] == input->ne[2] &&
+           input->ne[3] == 1 &&
+           (ggml_nelements(alpha) == 1 || alpha->ne[0] == channels || alpha->ne[1] == channels) &&
+           (ggml_nelements(gamma) == 1 || gamma->ne[0] == channels || gamma->ne[1] == channels) &&
+           (ggml_nelements(beta) == 1 || beta->ne[0] == channels || beta->ne[1] == channels);
+}
+
+static void ggml_vk_kokoro_adain_snake_1d_t(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    GGML_ASSERT(dst->op == GGML_OP_KOKORO_ADAIN_SNAKE_1D_T);
+    GGML_ASSERT(ggml_vk_kokoro_adain_snake_1d_t_supported(dst));
+
+    vk_pipeline pipeline = ctx->device->pipeline_kokoro_adain_snake_1d_t_f32;
+    if (pipeline == nullptr) {
+        GGML_ABORT("ggml_vulkan: missing Kokoro AdaIN Snake1D transpose pipeline");
+    }
+
+    const ggml_tensor * alpha = dst->src[0];
+    const ggml_tensor * input = dst->src[1];
+    const ggml_tensor * gamma = dst->src[2];
+    const ggml_tensor * beta  = dst->src[3];
+
+    const vk_op_kokoro_adain_snake_1d_t_push_constants pc = {
+        (uint32_t)dst->ne[0],
+        (uint32_t)dst->ne[1],
+        (uint32_t)dst->ne[2],
+        (uint32_t)(input->nb[0] / sizeof(float)),
+        (uint32_t)(input->nb[1] / sizeof(float)),
+        (uint32_t)(input->nb[2] / sizeof(float)),
+        (uint32_t)alpha->ne[0],
+        (uint32_t)alpha->ne[1],
+        (uint32_t)(alpha->nb[0] / sizeof(float)),
+        (uint32_t)(alpha->nb[1] / sizeof(float)),
+        (uint32_t)gamma->ne[0],
+        (uint32_t)gamma->ne[1],
+        (uint32_t)(gamma->nb[0] / sizeof(float)),
+        (uint32_t)(gamma->nb[1] / sizeof(float)),
+        (uint32_t)beta->ne[0],
+        (uint32_t)beta->ne[1],
+        (uint32_t)(beta->nb[0] / sizeof(float)),
+        (uint32_t)(beta->nb[1] / sizeof(float)),
+    };
+
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
+        ggml_vk_tensor_subbuffer(ctx, alpha, true),
+        ggml_vk_tensor_subbuffer(ctx, input, true),
+        ggml_vk_tensor_subbuffer(ctx, gamma, true),
+        ggml_vk_tensor_subbuffer(ctx, beta, true),
+        ggml_vk_tensor_subbuffer(ctx, dst, true),
+    }, pc, {(uint32_t)ggml_nelements(dst), 1, 1});
 }
 
 static void ggml_vk_pool_2d(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
@@ -14507,6 +15093,16 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         ggml_vk_conv_transpose_1d(ctx, compute_ctx, src0, src1, node);
 
         break;
+    case GGML_OP_STFT:
+    case GGML_OP_AA_STFT:
+        ggml_vk_stft(ctx, compute_ctx, src0, src1, node);
+
+        break;
+    case GGML_OP_ISTFT:
+    case GGML_OP_AA_ISTFT:
+        ggml_vk_istft(ctx, compute_ctx, src0, src1, node);
+
+        break;
     case GGML_OP_POOL_2D:
         ggml_vk_pool_2d(ctx, compute_ctx, src0, node);
 
@@ -14550,6 +15146,31 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
 
     case GGML_OP_GATED_DELTA_NET:
         ggml_vk_gated_delta_net(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_KOKORO_LSTM_SCAN:
+        ggml_vk_kokoro_lstm_scan(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_KOKORO_LSTM_STEP:
+        ggml_vk_kokoro_lstm_step(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_KOKORO_CONV_1D:
+        ggml_vk_kokoro_conv_1d(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_KOKORO_SNAKE_1D_T:
+        ggml_vk_kokoro_snake_1d_t(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
+        ggml_vk_kokoro_adain_snake_1d_t(ctx, compute_ctx, node);
 
         break;
 
@@ -17225,6 +17846,16 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 }
                 return op->type == GGML_TYPE_F32;
             }
+        case GGML_OP_KOKORO_LSTM_SCAN:
+            return ggml_vk_kokoro_lstm_scan_supported(op);
+        case GGML_OP_KOKORO_LSTM_STEP:
+            return ggml_vk_kokoro_lstm_step_supported(op);
+        case GGML_OP_KOKORO_CONV_1D:
+            return ggml_vk_kokoro_conv_1d_supported(op);
+        case GGML_OP_KOKORO_SNAKE_1D_T:
+            return ggml_vk_kokoro_snake_1d_t_supported(op);
+        case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
+            return ggml_vk_kokoro_adain_snake_1d_t_supported(op);
         case GGML_OP_SSM_SCAN:
             {
                 for (int i = 0; i < 6; i++) {
@@ -17267,6 +17898,15 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_CONV_TRANSPOSE_1D:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
+        case GGML_OP_STFT:
+        case GGML_OP_AA_STFT:
+        case GGML_OP_ISTFT:
+        case GGML_OP_AA_ISTFT:
+            return op->type == GGML_TYPE_F32 &&
+                   op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   ggml_is_contiguous(op->src[0]) &&
+                   ggml_is_contiguous(op->src[1]);
         case GGML_OP_COL2IM_1D:
             return (op->src[0]->type == GGML_TYPE_F32 ||
                     op->src[0]->type == GGML_TYPE_F16 ||
@@ -18104,7 +18744,17 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             const int32_t s0 = tensor->op_params[0];
             const int32_t p0 = tensor->op_params[1];
             const int32_t d0 = tensor->op_params[2];
-            tensor_clone = ggml_conv_transpose_1d(ggml_ctx, src_clone[0], src_clone[1], s0, p0, d0);
+            const int32_t op0 = tensor->op_params[3];
+            const int32_t g0 = tensor->op_params[4];
+            tensor_clone = ggml_conv_transpose_1d_ex(ggml_ctx, src_clone[0], src_clone[1], s0, p0, d0, op0, g0);
+        } else if (tensor->op == GGML_OP_STFT || tensor->op == GGML_OP_AA_STFT) {
+            const int32_t n_fft = ((const int32_t *)tensor->op_params)[0];
+            const int32_t hop = ((const int32_t *)tensor->op_params)[1];
+            tensor_clone = ggml_stft(ggml_ctx, src_clone[0], src_clone[1], n_fft, hop, tensor->op == GGML_OP_AA_STFT);
+        } else if (tensor->op == GGML_OP_ISTFT || tensor->op == GGML_OP_AA_ISTFT) {
+            const int32_t n_fft = ((const int32_t *)tensor->op_params)[0];
+            const int32_t hop = ((const int32_t *)tensor->op_params)[1];
+            tensor_clone = ggml_istft(ggml_ctx, src_clone[0], src_clone[1], n_fft, hop, tensor->op == GGML_OP_AA_ISTFT);
         } else if (tensor->op == GGML_OP_COL2IM_1D) {
             const int32_t stride = tensor->op_params[0];
             const int32_t oc     = tensor->op_params[1];
@@ -18152,6 +18802,20 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             tensor_clone = ggml_gated_delta_net(ggml_ctx, src_clone[0], src_clone[1],
             src_clone[2], src_clone[3], src_clone[4], src_clone[5],
             ggml_get_op_params_i32(tensor, 0));
+        } else if (tensor->op == GGML_OP_KOKORO_LSTM_SCAN) {
+            tensor_clone = ggml_kokoro_lstm_scan(ggml_ctx, src_clone[0], src_clone[1],
+            src_clone[2], src_clone[3], src_clone[4], ggml_get_op_params_i32(tensor, 0) != 0);
+        } else if (tensor->op == GGML_OP_KOKORO_LSTM_STEP) {
+            tensor_clone = ggml_kokoro_lstm_step(ggml_ctx, src_clone[0], src_clone[1],
+            src_clone[2], src_clone[3]);
+        } else if (tensor->op == GGML_OP_KOKORO_CONV_1D) {
+            tensor_clone = ggml_kokoro_conv_1d(ggml_ctx, src_clone[0], src_clone[1],
+            ggml_get_op_params_i32(tensor, 0), ggml_get_op_params_i32(tensor, 1), ggml_get_op_params_i32(tensor, 2));
+        } else if (tensor->op == GGML_OP_KOKORO_SNAKE_1D_T) {
+            tensor_clone = ggml_kokoro_snake_1d_t(ggml_ctx, src_clone[0], src_clone[1]);
+        } else if (tensor->op == GGML_OP_KOKORO_ADAIN_SNAKE_1D_T) {
+            tensor_clone = ggml_kokoro_adain_snake_1d_t(ggml_ctx, src_clone[0], src_clone[1],
+            src_clone[2], src_clone[3]);
         } else if (tensor->op == GGML_OP_OPT_STEP_ADAMW) {
             src_clone[0]->flags = tensor->src[0]->flags;
             tensor_clone = ggml_opt_step_adamw(ggml_ctx, src_clone[0], src_clone[1],

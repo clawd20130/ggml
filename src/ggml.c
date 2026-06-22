@@ -1064,6 +1064,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "RWKV_WKV7",
     "SOLVE_TRI",
     "GATED_DELTA_NET",
+    "KOKORO_LSTM_SCAN",
+    "KOKORO_LSTM_STEP",
+    "KOKORO_CONV_1D",
+    "KOKORO_SNAKE_1D_T",
+    "KOKORO_ADAIN_SNAKE_1D_T",
 
     "UNARY",
 
@@ -1079,9 +1084,13 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+    "STFT",
+    "AA_STFT",
+    "ISTFT",
+    "AA_ISTFT",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1175,6 +1184,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rwkv_wkv7(r, w, k, v, a, b, s)",
     "A X = B, A triangular, solve X",
     "gated_delta_net(q, k, v, g, beta, s)",
+    "kokoro_lstm_scan(x, w, b, h0, c0)",
+    "kokoro_lstm_step(x, r, b, c0)",
+    "kokoro_conv_1d(w, x)",
+    "kokoro_snake_1d_t(alpha, x)",
+    "kokoro_adain_snake_1d_t(alpha, x, gamma, beta)",
 
     "unary(x)",
 
@@ -1190,9 +1204,13 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+    "stft(x)",
+    "aa_stft(x)",
+    "istft(x)",
+    "aa_istft(x)",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -4127,6 +4145,58 @@ struct ggml_tensor * ggml_soft_max_ext_back_inplace(
     return ggml_soft_max_ext_back_impl(ctx, a, b, scale, max_bias, true);
 }
 
+// ggml_stft
+
+static int64_t calculate_number_of_frames(int64_t length, size_t hop_length) {
+    return (int64_t)(length / (int64_t) hop_length) + 1;
+}
+
+struct ggml_tensor * ggml_stft(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * w,
+        int                   filter_length,
+        int                   hop_length,
+        bool                  compute_abs_and_angle) {
+    const int64_t ne[4] = { filter_length, calculate_number_of_frames(a->ne[0], hop_length), a->ne[1], 2 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = compute_abs_and_angle ? GGML_OP_AA_STFT : GGML_OP_STFT;
+    result->src[0] = a;
+    result->src[1] = w;
+
+    int32_t params[] = { (int32_t) filter_length, (int32_t) hop_length };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    return result;
+}
+
+// ggml_istft
+
+static int64_t calculate_original_length(int64_t frames, size_t hop_length) {
+    return (frames - 1) * (int64_t) hop_length;
+}
+
+struct ggml_tensor * ggml_istft(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * w,
+        int                   filter_length,
+        int                   hop_length,
+        bool                  from_abs_and_angle) {
+    const int64_t ne[4] = { calculate_original_length(a->ne[1], hop_length), a->ne[2], 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = from_abs_and_angle ? GGML_OP_AA_ISTFT : GGML_OP_ISTFT;
+    result->src[0] = a;
+    result->src[1] = w;
+
+    int32_t params[] = { (int32_t) filter_length, (int32_t) hop_length };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    return result;
+}
+
 // ggml_rope
 
 static struct ggml_tensor * ggml_rope_impl(
@@ -4580,8 +4650,8 @@ struct ggml_tensor * ggml_col2im_1d(
 
 // ggml_conv_transpose_1d
 
-static int64_t ggml_calc_conv_transpose_1d_output_size(int64_t ins, int64_t ks, int s, int p, int d) {
-    return (ins - 1) * s - 2 * p + d * (ks - 1) + 1;
+static int64_t ggml_calc_conv_transpose_1d_output_size(int64_t ins, int64_t ks, int s, int p, int d, int op) {
+    return (ins - 1) * s - 2 * p + d * (ks - 1) + op + 1;
 }
 
 GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
@@ -4591,20 +4661,34 @@ GGML_API struct ggml_tensor * ggml_conv_transpose_1d(
         int                   s0,
         int                   p0,
         int                   d0) {
+    return ggml_conv_transpose_1d_ex(ctx, a, b, s0, p0, d0, 0, 1);
+}
+
+GGML_API struct ggml_tensor * ggml_conv_transpose_1d_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   s0,
+        int                   p0,
+        int                   d0,
+        int                   op0,
+        int                   g0) {
     GGML_ASSERT(ggml_is_matrix(b));
     GGML_ASSERT(a->ne[2] == b->ne[1]);
     GGML_ASSERT(a->ne[3] == 1);
 
-    GGML_ASSERT(p0 == 0);
+    GGML_ASSERT(p0 == 0 || (p0 < s0 && s0 % p0 == 0));
     GGML_ASSERT(d0 == 1);
+    GGML_ASSERT(g0 > 0);
+    GGML_ASSERT(b->ne[1] % g0 == 0);
 
     const int64_t ne[4] = {
-        ggml_calc_conv_transpose_1d_output_size(b->ne[0], a->ne[0], s0, 0 /*p0*/, 1 /*d0*/),
-        a->ne[1], b->ne[2], 1,
+        ggml_calc_conv_transpose_1d_output_size(b->ne[0], a->ne[0], s0, p0, d0, op0),
+        a->ne[1]*g0, b->ne[2], 1,
     };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
-    int32_t params[] = { s0, p0, d0 };
+    int32_t params[] = { s0, p0, d0, op0, g0 };
     ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = GGML_OP_CONV_TRANSPOSE_1D;
@@ -6267,6 +6351,168 @@ struct ggml_tensor * ggml_gated_delta_net(
     result->src[3] = g;
     result->src[4] = beta;
     result->src[5] = state;
+
+    return result;
+}
+
+// ggml_kokoro_lstm_scan
+
+struct ggml_tensor * ggml_kokoro_lstm_scan(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * input_gates,
+        struct ggml_tensor  * recurrent_weights,
+        struct ggml_tensor  * recurrent_biases,
+        struct ggml_tensor  * h0,
+        struct ggml_tensor  * c0,
+        bool                  reversed) {
+    GGML_ASSERT(input_gates->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_weights->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_biases->type == GGML_TYPE_F32);
+    GGML_ASSERT(h0->type == GGML_TYPE_F32);
+    GGML_ASSERT(c0->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(input_gates));
+    GGML_ASSERT(ggml_is_contiguous(recurrent_weights));
+    GGML_ASSERT(ggml_is_contiguous(recurrent_biases));
+    GGML_ASSERT(ggml_is_contiguous(h0));
+    GGML_ASSERT(ggml_is_contiguous(c0));
+
+    const int64_t hidden = h0->ne[0];
+    const int64_t sequence = input_gates->ne[1];
+    GGML_ASSERT(c0->ne[0] == hidden);
+    GGML_ASSERT(input_gates->ne[0] == 4 * hidden);
+    GGML_ASSERT(recurrent_weights->ne[0] == hidden);
+    GGML_ASSERT(recurrent_weights->ne[1] == 4 * hidden);
+    GGML_ASSERT(recurrent_biases->ne[0] == 4 * hidden);
+
+    const int64_t ne[2] = { hidden, sequence };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
+    ggml_set_op_params_i32(result, 0, reversed ? 1 : 0);
+
+    result->op     = GGML_OP_KOKORO_LSTM_SCAN;
+    result->src[0] = input_gates;
+    result->src[1] = recurrent_weights;
+    result->src[2] = recurrent_biases;
+    result->src[3] = h0;
+    result->src[4] = c0;
+
+    return result;
+}
+
+// ggml_kokoro_lstm_step
+
+struct ggml_tensor * ggml_kokoro_lstm_step(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * input_gate_step,
+        struct ggml_tensor  * recurrent_linear,
+        struct ggml_tensor  * recurrent_biases,
+        struct ggml_tensor  * c0) {
+    GGML_ASSERT(input_gate_step->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_linear->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_biases->type == GGML_TYPE_F32);
+    GGML_ASSERT(c0->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(input_gate_step));
+    GGML_ASSERT(ggml_is_contiguous(recurrent_linear));
+    GGML_ASSERT(ggml_is_contiguous(recurrent_biases));
+    GGML_ASSERT(ggml_is_contiguous(c0));
+
+    const int64_t hidden = c0->ne[0];
+    GGML_ASSERT(input_gate_step->ne[0] == 4 * hidden);
+    GGML_ASSERT(recurrent_linear->ne[0] == 4 * hidden);
+    GGML_ASSERT(recurrent_biases->ne[0] == 4 * hidden);
+
+    const int64_t ne[2] = { hidden, 2 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
+
+    result->op     = GGML_OP_KOKORO_LSTM_STEP;
+    result->src[0] = input_gate_step;
+    result->src[1] = recurrent_linear;
+    result->src[2] = recurrent_biases;
+    result->src[3] = c0;
+
+    return result;
+}
+
+// ggml_kokoro_conv_1d
+
+struct ggml_tensor * ggml_kokoro_conv_1d(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * weight,
+        struct ggml_tensor  * input,
+        int                   s0,
+        int                   p0,
+        int                   d0) {
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(weight));
+    GGML_ASSERT(weight->ne[1] == input->ne[1]);
+    GGML_ASSERT(input->ne[3] == 1);
+
+    const int64_t output_length = ggml_calc_conv_output_size(input->ne[0], weight->ne[0], s0, p0, d0);
+    GGML_ASSERT(output_length > 0);
+
+    const int64_t ne[3] = { output_length, weight->ne[2], input->ne[2] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
+
+    int32_t params[] = { s0, p0, d0 };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_KOKORO_CONV_1D;
+    result->src[0] = weight;
+    result->src[1] = input;
+
+    return result;
+}
+
+// ggml_kokoro_snake_1d_t
+
+struct ggml_tensor * ggml_kokoro_snake_1d_t(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * alpha,
+        struct ggml_tensor  * input) {
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->ne[3] == 1);
+
+    const int64_t channels = input->ne[0];
+    GGML_ASSERT(ggml_nelements(alpha) == 1 || alpha->ne[0] == channels || alpha->ne[1] == channels);
+
+    const int64_t ne[3] = { input->ne[1], channels, input->ne[2] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
+
+    result->op     = GGML_OP_KOKORO_SNAKE_1D_T;
+    result->src[0] = alpha;
+    result->src[1] = input;
+
+    return result;
+}
+
+// ggml_kokoro_adain_snake_1d_t
+
+struct ggml_tensor * ggml_kokoro_adain_snake_1d_t(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * alpha,
+        struct ggml_tensor  * input,
+        struct ggml_tensor  * gamma,
+        struct ggml_tensor  * beta) {
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(gamma->type == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->ne[3] == 1);
+
+    const int64_t channels = input->ne[0];
+    GGML_ASSERT(ggml_nelements(alpha) == 1 || alpha->ne[0] == channels || alpha->ne[1] == channels);
+    GGML_ASSERT(ggml_nelements(gamma) == 1 || gamma->ne[0] == channels || gamma->ne[1] == channels);
+    GGML_ASSERT(ggml_nelements(beta) == 1 || beta->ne[0] == channels || beta->ne[1] == channels);
+
+    const int64_t ne[3] = { input->ne[1], channels, input->ne[2] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
+
+    result->op     = GGML_OP_KOKORO_ADAIN_SNAKE_1D_T;
+    result->src[0] = alpha;
+    result->src[1] = input;
+    result->src[2] = gamma;
+    result->src[3] = beta;
 
     return result;
 }

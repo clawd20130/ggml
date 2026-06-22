@@ -51,6 +51,10 @@ void ggml_compute_forward_l2_norm(const struct ggml_compute_params * params, str
 void ggml_compute_forward_out_prod(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_scale(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_set(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_stft(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_abs_angle_stft(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_istft(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_abs_angle_istft(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_cpy(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_cont(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_get_rows(const struct ggml_compute_params * params, struct ggml_tensor * dst);
@@ -105,6 +109,11 @@ void ggml_compute_forward_rwkv_wkv7(const struct ggml_compute_params * params, s
 void ggml_compute_forward_solve_tri(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_gla(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_gated_delta_net(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_kokoro_lstm_scan(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_kokoro_lstm_step(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_kokoro_conv_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_kokoro_snake_1d_t(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_kokoro_adain_snake_1d_t(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom1(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom3(const struct ggml_compute_params * params, struct ggml_tensor * dst);

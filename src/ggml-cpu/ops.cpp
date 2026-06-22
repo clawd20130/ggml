@@ -12,6 +12,10 @@
 #include <cfloat>
 #include <cmath>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // ggml_compute_forward_dup
 
 static void ggml_compute_forward_dup_same_cont(
@@ -841,12 +845,12 @@ static void ggml_compute_forward_add1_f16_f32(
 
     GGML_TENSOR_UNARY_OP_LOCALS
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_F32);
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F16);
 
     GGML_ASSERT( nb0 == sizeof(ggml_fp16_t));
-    GGML_ASSERT(nb00 == sizeof(ggml_fp16_t));
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || nb00 == sizeof(ggml_fp16_t));
 
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
@@ -889,7 +893,7 @@ static void ggml_compute_forward_add1_f16_f16(
 
     GGML_TENSOR_UNARY_OP_LOCALS
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_F32);
     GGML_ASSERT(src1->type == GGML_TYPE_F16);
     GGML_ASSERT(dst->type  == GGML_TYPE_F16);
 
@@ -4722,6 +4726,309 @@ void ggml_compute_forward_set(
     }
 }
 
+// ggml_compute_forward_stft
+
+// Simple O(N*N) DFT fallback for FFT sizes that are not radix-2 compatible.
+static void simple_dft(
+        float * mdst,
+        float * phdst,
+        float * buffer,
+        size_t n_fft,
+        size_t step) {
+    const float base_k = (float) M_PI * -2.0f / (float) n_fft;
+    for (int i = 0; i < (int) n_fft; i++) {
+        float tm = 0.0f;
+        float tph = 0.0f;
+        for (int ii = 0; ii < (int) n_fft; ii++) {
+            const float k = base_k * (float) ii * (float) i;
+            const float m = cosf(k);
+            const float expk = sinf(k);
+            tm += mdst[ii*step] * m - phdst[ii*step] * expk;
+            tph += mdst[ii*step] * expk + phdst[ii*step] * m;
+        }
+        buffer[i*2] = tm;
+        buffer[i*2 + 1] = tph;
+    }
+
+    for (int i = 0; i < (int) n_fft; i++) {
+        mdst[i*step] = buffer[i*2];
+        phdst[i*step] = buffer[i*2 + 1];
+    }
+}
+
+// Radix-2 Cooley-Tukey FFT. Odd-sized branches fall back to simple_dft.
+static void radix2_fft(
+        float * mdst,
+        float * phdst,
+        float * buffer,
+        size_t n_fft,
+        size_t step) {
+    if (n_fft == 1) {
+        return;
+    }
+    if (n_fft % 2 != 0) {
+        simple_dft(mdst, phdst, buffer, n_fft, step);
+        return;
+    }
+
+    radix2_fft(mdst, phdst, buffer, n_fft/2, step*2);
+    radix2_fft(
+        (float *) ((char *) mdst  + step * sizeof(float)),
+        (float *) ((char *) phdst + step * sizeof(float)),
+        buffer,
+        n_fft/2,
+        step*2);
+
+    const float km = (float) M_PI * -2.0f / (float) n_fft;
+
+    for (int i = 0; 2 * i < (int) n_fft; i++) {
+        const float k = km * (float) i;
+        const float k1 = cosf(k);
+        const float k2 = sinf(k);
+
+        const float mp = mdst[i*2*step];
+        const float php = phdst[i*2*step];
+        const float mq = mdst[(i*2 + 1)*step] * k1 - k2 * phdst[(i*2 + 1)*step];
+        const float phq = mdst[(i*2 + 1)*step] * k2 + k1 * phdst[(i*2 + 1)*step];
+
+        buffer[i + n_fft] = php + phq;
+        buffer[i] = mp + mq;
+        buffer[(i + (n_fft / 2)) + n_fft] = php - phq;
+        buffer[i + (n_fft / 2)] = mp - mq;
+    }
+    for (int i = 0; i < (int) n_fft; i++) {
+        mdst[i*step] = buffer[i];
+        phdst[i*step] = buffer[i + n_fft];
+    }
+}
+
+static void ggml_compute_forward_stft_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst,
+        bool compute_abs_and_angle) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const float * w = (float *) src1->data;
+
+    const size_t n_fft = ((int32_t *) dst->op_params)[0];
+    const size_t hop   = ((int32_t *) dst->op_params)[1];
+    const int half = n_fft / 2;
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+
+    GGML_TENSOR_BINARY_OP_LOCALS;
+    GGML_ASSERT(n_fft == (size_t) ne10);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    if (ith == 0) {
+        memset(dst->data, 0, ggml_nbytes(dst));
+        memset(params->wdata, 0, (n_fft * 2 + CACHE_LINE_SIZE_F32) * nth * sizeof(float));
+    }
+    ggml_barrier(params->threadpool);
+
+    float * buffer = ((float *) params->wdata) + (n_fft * 2 + CACHE_LINE_SIZE_F32) * ith;
+
+    const int hpt = (ne1 + nth - 1) / nth;
+    const int ir0 = hpt * ith;
+    const int ir1 = MIN(ir0 + hpt, ne1);
+
+    for (int b = 0; b < ne01; b++) {
+        for (int i1 = ir0; i1 < ir1; i1++) {
+            const int ch = i1 * hop;
+            float * mdst_data = (float *) ((char *) dst->data  + i1*nb1 + b*nb2);
+            float * phdst_data = (float *) ((char *) dst->data + i1*nb1 + nb3 + b*nb2);
+            float * tgt_data = (float *) ((char *) src0->data + b*nb01);
+
+            for (int i = 0; i < (int) n_fft; i++) {
+                const int ai = ch - half + i;
+                if (ai < 0) {
+                    mdst_data[i] = tgt_data[-ai] * w[i];
+                } else if (ai >= ne00) {
+                    mdst_data[i] = tgt_data[ne00 - (ai - ne00 + 1)] * w[i];
+                } else {
+                    mdst_data[i] = tgt_data[ai] * w[i];
+                }
+            }
+
+            radix2_fft(mdst_data, phdst_data, buffer, n_fft, 1);
+            if (compute_abs_and_angle) {
+                for (int i = 0; i < (int) n_fft; i++) {
+                    const float abs = sqrtf(mdst_data[i]*mdst_data[i] + phdst_data[i]*phdst_data[i]);
+                    const float agl = atan2f(phdst_data[i], mdst_data[i]);
+                    mdst_data[i] = abs;
+                    phdst_data[i] = agl;
+                }
+            }
+        }
+    }
+}
+
+void ggml_compute_forward_stft(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_stft_f32(params, dst, false);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+void ggml_compute_forward_abs_angle_stft(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_stft_f32(params, dst, true);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_istft
+
+// This inverse FFT uses the time-reversal property of DFT.
+static void radix2_ifft(
+        float * mdst,
+        float * phdst,
+        float * buffer,
+        float * tgt,
+        float * window,
+        size_t n_fft,
+        size_t step,
+        int min_length,
+        int max_length,
+        int index,
+        int offset) {
+    radix2_fft(mdst, phdst, buffer, n_fft, step);
+    for (int i = 0; i < (int) n_fft; i++) {
+        const int base_index = (n_fft - i) % n_fft;
+        const float w = window[base_index];
+        const int tgt_index = base_index - offset;
+        const int location = index + tgt_index;
+        if (location < min_length || location >= max_length) {
+            continue;
+        }
+        tgt[location] += mdst[i] / n_fft * w;
+    }
+}
+
+static void ggml_compute_forward_istft_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst,
+        bool from_abs_and_angle) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * window = dst->src[1];
+
+    const size_t n_fft = ((int32_t *) dst->op_params)[0];
+    const size_t hop   = ((int32_t *) dst->op_params)[1];
+    const int half = n_fft / 2;
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+
+    GGML_TENSOR_UNARY_OP_LOCALS;
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    if (ith == 0) {
+        memset(dst->data, 0, ggml_nbytes(dst));
+    }
+    ggml_barrier(params->threadpool);
+
+    float * buffer = ((float *) params->wdata) + (n_fft * 2 + CACHE_LINE_SIZE_F32) * ith;
+    float * phm_buffer = ((float *) params->wdata) +
+        (n_fft * 2 + CACHE_LINE_SIZE_F32) * nth +
+        (n_fft * 2 + CACHE_LINE_SIZE_F32) * ith;
+
+    const int spt = (ne0 + nth - 1) / nth;
+    const int poa = half / hop - 1;
+    const int pob = half / hop + 1;
+    const int min_spt = ith * spt;
+    const int max_spt = MIN(min_spt + spt, ne0);
+    const int ir0 = ith == 0 ? 0 : (min_spt / hop) - poa;
+    const int ir1 = MIN((max_spt / hop) + pob, ne01);
+
+    const bool onesided = ne00 == half + 1;
+    for (int b = 0; b < ne02; b++) {
+        for (int i1 = ir0; i1 < ir1; i1++) {
+            float * mdst_data = (float *) ((char *) src0->data + i1*nb01 + b*nb02);
+            float * phdst_data = (float *) ((char *) src0->data + i1*nb01 + nb03 + b*nb02);
+            float * tgt_data = (float *) ((char *) dst->data + b*nb1);
+            for (int i = 0; i < (int) n_fft; i++) {
+                int index = i;
+                float multiplier = 1.0f;
+                if (onesided && i >= half + 1) {
+                    index = n_fft - i;
+                    multiplier = -1.0f;
+                }
+                float real = mdst_data[index];
+                float imag = phdst_data[index] * multiplier;
+                if (from_abs_and_angle) {
+                    const float magnitude = mdst_data[index];
+                    const float phase = phdst_data[index];
+                    real = magnitude * cosf(phase);
+                    imag = magnitude * multiplier * sinf(phase);
+                }
+                phm_buffer[i] = real;
+                phm_buffer[i + n_fft] = imag;
+            }
+            radix2_ifft(phm_buffer, phm_buffer + n_fft, buffer, tgt_data, (float *) window->data, n_fft, 1, min_spt, max_spt, i1*hop, half);
+        }
+    }
+}
+
+void ggml_compute_forward_abs_angle_istft(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_istft_f32(params, dst, true);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+void ggml_compute_forward_istft(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_istft_f32(params, dst, false);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 // ggml_compute_forward_cpy
 
 void ggml_compute_forward_cpy(
@@ -6064,9 +6371,13 @@ static void ggml_compute_forward_conv_transpose_1d_f16_f32(
     ggml_barrier(params->threadpool);
 
     const int32_t s0 = ((const int32_t*)(dst->op_params))[0];
+    const int32_t p0 = ((const int32_t*)(dst->op_params))[1];
+    const int32_t g0 = ((const int32_t*)(dst->op_params))[4];
 
     // total rows in dst
     const int nr = ne1;
+    const int gne02 = ne02 / g0;
+    const int kernel_m = gne02 == 1 ? 1 : ne02*ne00;
 
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
@@ -6080,15 +6391,19 @@ static void ggml_compute_forward_conv_transpose_1d_f16_f32(
 
     for (int i1 = ir0; i1 < ir1; i1++) {
         float * dst_data = (float *)((char *) dst->data + i1*nb1);
-        ggml_fp16_t * wdata_kernel = wdata + i1*ne02*ne00;
+        ggml_fp16_t * wdata_kernel = wdata + i1*kernel_m;
         for (int i10 = 0; i10 < ne10; i10++) {
-            const int i1n = i10*ne11;
+            const int i1n = i10*ne11 + (int)(i1 / gne02);
             for (int i00 = 0; i00 < ne00; i00++) {
+                const int out_t = i10*s0 + i00 - p0;
+                if (out_t < 0 || out_t >= ne0) {
+                    continue;
+                }
                 float v = 0;
-                ggml_vec_dot_f16(ne02, &v, 0,
+                ggml_vec_dot_f16(gne02, &v, 0,
                         (ggml_fp16_t *)    wdata_src + i1n, 0,
                         (ggml_fp16_t *) wdata_kernel + i00*ne02, 0, 1);
-                dst_data[i10*s0 + i00] += v;
+                dst_data[out_t] += v;
             }
         }
     }
@@ -6152,9 +6467,13 @@ static void ggml_compute_forward_conv_transpose_1d_f32(
     ggml_barrier(params->threadpool);
 
     const int32_t s0 = ((const int32_t*)(dst->op_params))[0];
+    const int32_t p0 = ((const int32_t*)(dst->op_params))[1];
+    const int32_t g0 = ((const int32_t*)(dst->op_params))[4];
 
     // total rows in dst
     const int nr = ne1;
+    const int gne02 = ne02 / g0;
+    const int kernel_m = gne02 == 1 ? 1 : ne02*ne00;
 
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
@@ -6168,15 +6487,19 @@ static void ggml_compute_forward_conv_transpose_1d_f32(
 
     for (int i1 = ir0; i1 < ir1; i1++) {
         float * dst_data = (float *)((char *) dst->data + i1*nb1);
-        float * wdata_kernel = wdata + i1*ne02*ne00;
+        float * wdata_kernel = wdata + i1*kernel_m;
         for (int i10 = 0; i10 < ne10; i10++) {
-            const int i1n = i10*ne11;
+            const int i1n = i10*ne11 + (int)(i1 / gne02);
             for (int i00 = 0; i00 < ne00; i00++) {
+                const int out_t = i10*s0 + i00 - p0;
+                if (out_t < 0 || out_t >= ne0) {
+                    continue;
+                }
                 float v = 0;
-                ggml_vec_dot_f32(ne02, &v, 0,
+                ggml_vec_dot_f32(gne02, &v, 0,
                         wdata_src + i1n, 0,
                         wdata_kernel + i00*ne02, 0, 1);
-                dst_data[i10*s0 + i00] += v;
+                dst_data[out_t] += v;
             }
         }
     }
@@ -6291,7 +6614,7 @@ static void ggml_compute_forward_im2col_f16(
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_F32);
     GGML_ASSERT(src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_F32);
     GGML_ASSERT( dst->type == GGML_TYPE_F16);
 
@@ -6322,7 +6645,7 @@ static void ggml_compute_forward_im2col_f16(
     int ofs0 = is_2D ? nb13 : nb12;
     int ofs1 = is_2D ? nb12 : nb11;
 
-    GGML_ASSERT(nb00 == sizeof(ggml_fp16_t));
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || nb00 == sizeof(ggml_fp16_t));
     GGML_ASSERT(nb10 == ggml_type_size(src1->type));
 
     // im2col: [N, IC, IH, IW] => [N, OH, OW, IC*KH*KW]
@@ -10580,6 +10903,351 @@ void ggml_compute_forward_solve_tri(const struct ggml_compute_params * params, s
         ggml_compute_forward_solve_tri_f32(params, dst);
     } else {
         GGML_ABORT("fatal error");
+    }
+}
+
+// ggml_compute_forward_kokoro_lstm_scan
+
+static inline float ggml_kokoro_lstm_sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static void ggml_compute_forward_kokoro_lstm_scan_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    if (params->ith != 0) {
+        return;
+    }
+
+    const struct ggml_tensor * input_gates       = dst->src[0];
+    const struct ggml_tensor * recurrent_weights = dst->src[1];
+    const struct ggml_tensor * recurrent_biases  = dst->src[2];
+    const struct ggml_tensor * h0                = dst->src[3];
+    const struct ggml_tensor * c0                = dst->src[4];
+
+    GGML_ASSERT(input_gates->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_weights->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_biases->type == GGML_TYPE_F32);
+    GGML_ASSERT(h0->type == GGML_TYPE_F32);
+    GGML_ASSERT(c0->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t hidden = h0->ne[0];
+    const int64_t sequence = input_gates->ne[1];
+    const bool reversed = ggml_get_op_params_i32(dst, 0) != 0;
+
+    const char * input_data = (const char *) input_gates->data;
+    const char * weight_data = (const char *) recurrent_weights->data;
+    const char * bias_data = (const char *) recurrent_biases->data;
+    float * dst_data = (float *) dst->data;
+
+    float * h = (float *) params->wdata;
+    float * c = h + hidden;
+    float * next_h = c + hidden;
+    float * next_c = next_h + hidden;
+
+    memcpy(h, h0->data, hidden * sizeof(float));
+    memcpy(c, c0->data, hidden * sizeof(float));
+
+    for (int64_t step = 0; step < sequence; ++step) {
+        const int64_t t = reversed ? (sequence - 1 - step) : step;
+
+        for (int64_t j = 0; j < hidden; ++j) {
+            float gate_values[4];
+            for (int gate = 0; gate < 4; ++gate) {
+                const int64_t row = gate * hidden + j;
+                float value = *(const float *)(input_data + row * input_gates->nb[0] + t * input_gates->nb[1]);
+                value += *(const float *)(bias_data + row * recurrent_biases->nb[0]);
+                for (int64_t k = 0; k < hidden; ++k) {
+                    const float w = *(const float *)(weight_data + k * recurrent_weights->nb[0] + row * recurrent_weights->nb[1]);
+                    value += w * h[k];
+                }
+                gate_values[gate] = value;
+            }
+
+            const float i = ggml_kokoro_lstm_sigmoid(gate_values[0]);
+            const float f = ggml_kokoro_lstm_sigmoid(gate_values[1]);
+            const float g = tanhf(gate_values[2]);
+            const float o = ggml_kokoro_lstm_sigmoid(gate_values[3]);
+            const float c_val = f * c[j] + i * g;
+            next_c[j] = c_val;
+            next_h[j] = tanhf(c_val) * o;
+        }
+
+        for (int64_t j = 0; j < hidden; ++j) {
+            h[j] = next_h[j];
+            c[j] = next_c[j];
+            *(float *)((char *) dst_data + j * dst->nb[0] + t * dst->nb[1]) = h[j];
+        }
+    }
+}
+
+void ggml_compute_forward_kokoro_lstm_scan(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kokoro_lstm_scan_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_kokoro_lstm_step
+
+static void ggml_compute_forward_kokoro_lstm_step_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * input_gate_step  = dst->src[0];
+    const struct ggml_tensor * recurrent_linear = dst->src[1];
+    const struct ggml_tensor * recurrent_biases = dst->src[2];
+    const struct ggml_tensor * c0               = dst->src[3];
+
+    GGML_ASSERT(input_gate_step->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_linear->type == GGML_TYPE_F32);
+    GGML_ASSERT(recurrent_biases->type == GGML_TYPE_F32);
+    GGML_ASSERT(c0->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t hidden = c0->ne[0];
+    GGML_ASSERT(input_gate_step->ne[0] == 4 * hidden);
+    GGML_ASSERT(recurrent_linear->ne[0] == 4 * hidden);
+    GGML_ASSERT(recurrent_biases->ne[0] == 4 * hidden);
+    GGML_ASSERT(dst->ne[0] == hidden);
+    GGML_ASSERT(dst->ne[1] == 2);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const char * input_data = (const char *) input_gate_step->data;
+    const char * linear_data = (const char *) recurrent_linear->data;
+    const char * bias_data = (const char *) recurrent_biases->data;
+    const char * c0_data = (const char *) c0->data;
+    char * dst_data = (char *) dst->data;
+
+    for (int64_t j = ith; j < hidden; j += nth) {
+        float gate_values[4];
+        for (int gate = 0; gate < 4; ++gate) {
+            const int64_t row = gate * hidden + j;
+            const float r = *(const float *)(linear_data + row * recurrent_linear->nb[0]) +
+                            *(const float *)(bias_data + row * recurrent_biases->nb[0]);
+            gate_values[gate] = *(const float *)(input_data + row * input_gate_step->nb[0]) + r;
+        }
+
+        const float i = ggml_kokoro_lstm_sigmoid(gate_values[0]);
+        const float f = ggml_kokoro_lstm_sigmoid(gate_values[1]);
+        const float g = tanhf(gate_values[2]);
+        const float o = ggml_kokoro_lstm_sigmoid(gate_values[3]);
+        const float c_val = f * (*(const float *)(c0_data + j * c0->nb[0])) + i * g;
+        const float h_val = tanhf(c_val) * o;
+
+        *(float *)(dst_data + j * dst->nb[0]) = h_val;
+        *(float *)(dst_data + j * dst->nb[0] + dst->nb[1]) = c_val;
+    }
+}
+
+void ggml_compute_forward_kokoro_lstm_step(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kokoro_lstm_step_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_kokoro_conv_1d
+
+static void ggml_compute_forward_kokoro_conv_1d_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * weight = dst->src[0];
+    const struct ggml_tensor * input  = dst->src[1];
+
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t output_length = dst->ne[0];
+    const int64_t out_channels  = dst->ne[1];
+    const int64_t batch         = dst->ne[2];
+    const int64_t kernel        = weight->ne[0];
+    const int64_t in_channels   = weight->ne[1];
+    const int64_t input_length  = input->ne[0];
+
+    const int32_t s0 = ggml_get_op_params_i32(dst, 0);
+    const int32_t p0 = ggml_get_op_params_i32(dst, 1);
+    const int32_t d0 = ggml_get_op_params_i32(dst, 2);
+
+    const int64_t rows = output_length * batch;
+    const int64_t total = rows * out_channels;
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t idx = ith; idx < total; idx += nth) {
+        const int64_t row = idx % rows;
+        const int64_t oc  = idx / rows;
+        const int64_t ow  = row % output_length;
+        const int64_t n   = row / output_length;
+
+        float sum = 0.0f;
+        for (int64_t ic = 0; ic < in_channels; ++ic) {
+            for (int64_t kw = 0; kw < kernel; ++kw) {
+                const int64_t iw = ow * s0 + kw * d0 - p0;
+                if (iw < 0 || iw >= input_length) {
+                    continue;
+                }
+
+                const float w = *(const float *)((const char *)weight->data + kw * weight->nb[0] + ic * weight->nb[1] + oc * weight->nb[2]);
+                const float x = *(const float *)((const char *)input->data + iw * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
+                sum += w * x;
+            }
+        }
+
+        ((float *)dst->data)[row + oc * rows] = sum;
+    }
+}
+
+void ggml_compute_forward_kokoro_conv_1d(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kokoro_conv_1d_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_kokoro_snake_1d_t
+
+static float ggml_kokoro_snake_alpha(const struct ggml_tensor * alpha, int64_t channel) {
+    if (ggml_nelements(alpha) == 1) {
+        return *(const float *) alpha->data;
+    }
+    if (alpha->ne[0] > channel) {
+        return *(const float *)((const char *)alpha->data + channel * alpha->nb[0]);
+    }
+    GGML_ASSERT(alpha->ne[1] > channel);
+    return *(const float *)((const char *)alpha->data + channel * alpha->nb[1]);
+}
+
+static void ggml_compute_forward_kokoro_snake_1d_t_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * alpha = dst->src[0];
+    const struct ggml_tensor * input = dst->src[1];
+
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t length = dst->ne[0];
+    const int64_t channels = dst->ne[1];
+    const int64_t batch = dst->ne[2];
+    const int64_t total = length * channels * batch;
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t idx = ith; idx < total; idx += nth) {
+        const int64_t l = idx % length;
+        const int64_t c = (idx / length) % channels;
+        const int64_t n = idx / (length * channels);
+
+        const float x = *(const float *)((const char *)input->data + c * input->nb[0] + l * input->nb[1] + n * input->nb[2]);
+        const float a = ggml_kokoro_snake_alpha(alpha, c);
+        const float s = sinf(x * a);
+        ((float *)dst->data)[idx] = x + s * s / a;
+    }
+}
+
+void ggml_compute_forward_kokoro_snake_1d_t(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kokoro_snake_1d_t_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
+// ggml_compute_forward_kokoro_adain_snake_1d_t
+
+static float ggml_kokoro_channel_param(const struct ggml_tensor * param, int64_t channel) {
+    if (ggml_nelements(param) == 1) {
+        return *(const float *) param->data;
+    }
+    if (param->ne[0] > channel) {
+        return *(const float *)((const char *)param->data + channel * param->nb[0]);
+    }
+    GGML_ASSERT(param->ne[1] > channel);
+    return *(const float *)((const char *)param->data + channel * param->nb[1]);
+}
+
+static void ggml_compute_forward_kokoro_adain_snake_1d_t_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * alpha = dst->src[0];
+    const struct ggml_tensor * input = dst->src[1];
+    const struct ggml_tensor * gamma = dst->src[2];
+    const struct ggml_tensor * beta  = dst->src[3];
+
+    GGML_ASSERT(alpha->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(gamma->type == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t length = dst->ne[0];
+    const int64_t channels = dst->ne[1];
+    const int64_t batch = dst->ne[2];
+    const int64_t total = length * channels * batch;
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t idx = ith; idx < total; idx += nth) {
+        const int64_t l = idx % length;
+        const int64_t c = (idx / length) % channels;
+        const int64_t n = idx / (length * channels);
+
+        const float in = *(const float *)((const char *)input->data + c * input->nb[0] + l * input->nb[1] + n * input->nb[2]);
+        const float x = in + in * ggml_kokoro_channel_param(gamma, c) + ggml_kokoro_channel_param(beta, c);
+        const float a = ggml_kokoro_channel_param(alpha, c);
+        const float s = sinf(x * a);
+        ((float *)dst->data)[idx] = x + s * s / a;
+    }
+}
+
+void ggml_compute_forward_kokoro_adain_snake_1d_t(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_kokoro_adain_snake_1d_t_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
     }
 }
 
