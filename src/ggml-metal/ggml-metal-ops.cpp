@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     if (!t) {
@@ -23,6 +25,33 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     ggml_metal_buffer_t ctx = (ggml_metal_buffer_t) buffer->context;
 
     return ggml_metal_buffer_get_id(ctx, t);
+}
+
+struct ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config {
+    const char * kernel_name;
+    int t_tile;
+    int oc_tile;
+    int k_tile;
+};
+
+static ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config() {
+    const char * env = std::getenv("STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL");
+    if (!env || !env[0]) {
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+    }
+    if (std::strcmp(env, "scalar") == 0) {
+        return { nullptr, 0, 0, 0 };
+    }
+    if (std::strcmp(env, "phase") == 0 || std::strcmp(env, "phase_tiled") == 0) {
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+    }
+    if (std::strcmp(env, "phase_32x32_k64") == 0) {
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64 };
+    }
+    if (std::strcmp(env, "phase_32x32_k128") == 0) {
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+    }
+    return { nullptr, 0, 0, 0 };
 }
 
 struct ggml_metal_op {
@@ -3991,7 +4020,26 @@ int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int id
         /* .dst_nb2    = */ op->nb[2] / sizeof(float),
     };
 
-    auto pipeline = ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d(lib, op);
+    ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config phase_tiled =
+        ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config();
+    const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+    size_t phase_tiled_smem = phase_tiled.kernel_name
+        ? ((size_t) phase_tiled.k_tile * (size_t) phase_tiled.t_tile +
+           (size_t) phase_tiled.oc_tile * (size_t) phase_tiled.k_tile) * sizeof(float)
+        : 0;
+    if (phase_tiled.kernel_name && phase_tiled_smem > props_dev->max_theadgroup_memory_size) {
+        phase_tiled = { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64 };
+        phase_tiled_smem = ((size_t) phase_tiled.k_tile * (size_t) phase_tiled.t_tile +
+                            (size_t) phase_tiled.oc_tile * (size_t) phase_tiled.k_tile) * sizeof(float);
+    }
+    if (phase_tiled.kernel_name && phase_tiled_smem > props_dev->max_theadgroup_memory_size) {
+        phase_tiled = { nullptr, 0, 0, 0 };
+    }
+    const bool use_phase_tiled = phase_tiled.kernel_name && p0 == 0 && g0 == 1 && s0 > 0;
+
+    auto pipeline = use_phase_tiled
+        ? ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d_phase_tiled(lib, op, phase_tiled.kernel_name)
+        : ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d(lib, op);
 
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
@@ -4000,15 +4048,30 @@ int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int id
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bias),   3);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),     4);
 
-    constexpr int nth = 128;
-    ggml_metal_encoder_dispatch_threadgroups(
-        enc,
-        (OL + nth - 1) / nth,
-        OC,
-        (int32_t) op->ne[2],
-        nth,
-        1,
-        1);
+    if (use_phase_tiled) {
+        const int t_tile = phase_tiled.t_tile;
+        const int oc_tile = phase_tiled.oc_tile;
+        const int nth = t_tile * oc_tile;
+        const int32_t cols_per_phase = (OL + crop0 + s0 - 1) / s0;
+        ggml_metal_encoder_dispatch_threadgroups(
+            enc,
+            (cols_per_phase + t_tile - 1) / t_tile,
+            (OC + oc_tile - 1) / oc_tile,
+            (int32_t) op->ne[2] * s0,
+            nth,
+            1,
+            1);
+    } else {
+        constexpr int nth = 128;
+        ggml_metal_encoder_dispatch_threadgroups(
+            enc,
+            (OL + nth - 1) / nth,
+            OC,
+            (int32_t) op->ne[2],
+            nth,
+            1,
+            1);
+    }
 
     return 1;
 }

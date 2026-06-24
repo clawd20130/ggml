@@ -1843,6 +1843,29 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_style_bert_vits2
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d_phase_tiled(ggml_metal_library_t lib, const ggml_tensor * op, const char * kernel_name) {
+    assert(op->op == GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D);
+
+    GGML_ASSERT(ggml_is_contiguous(op->src[0]));
+    GGML_ASSERT(ggml_is_contiguous(op->src[1]));
+    GGML_ASSERT(ggml_is_contiguous(op->src[2]));
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[2]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type == GGML_TYPE_F32);
+
+    ggml_metal_pipeline_with_params res =
+        ggml_metal_library_get_pipeline(lib, kernel_name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib,
+            kernel_name,
+            kernel_name,
+            nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_conv_transpose_2d(ggml_metal_library_t lib, const ggml_tensor * op) {
     assert(op->op == GGML_OP_CONV_TRANSPOSE_2D);
 

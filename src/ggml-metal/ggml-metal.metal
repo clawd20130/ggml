@@ -5060,6 +5060,115 @@ kernel void kernel_style_bert_vits2_conv_transpose_1d_f32(
         (uint64_t) batch       * args.dst_nb2] = v + b;
 }
 
+typedef void (style_bert_vits2_conv_transpose_1d_phase_tiled_t)(
+        constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
+        device const float * weight,
+        device const float * input,
+        device const float * bias,
+        device       float * dst,
+        uint3   tgpig,
+        uint3   tpitg);
+
+template<int32_t T_TILE, int32_t OC_TILE, int32_t K_TILE>
+kernel void kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_f32_impl(
+        constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
+        device const float * weight,
+        device const float * input,
+        device const float * bias,
+        device       float * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        uint3   tpitg[[thread_position_in_threadgroup]]) {
+
+    constexpr int32_t NTH     = T_TILE * OC_TILE;
+
+    threadgroup float x_tile[K_TILE * T_TILE];
+    threadgroup float w_tile[OC_TILE * K_TILE];
+
+    const int32_t tid = (int32_t) tpitg.x;
+    const int32_t local_t = tid % T_TILE;
+    const int32_t local_oc = tid / T_TILE;
+
+    const int32_t phase = (int32_t) (tgpig.z % (uint32_t) args.s0);
+    const int32_t batch = (int32_t) (tgpig.z / (uint32_t) args.s0);
+    const int32_t col0 = (int32_t) tgpig.x * T_TILE;
+    const int32_t out_channel = (int32_t) tgpig.y * OC_TILE + local_oc;
+    const int32_t col = col0 + local_t;
+    const int32_t full_out_t = phase + col * args.s0;
+    const int32_t out_t = full_out_t - args.crop0;
+
+    if (args.g0 != 1 || args.p0 != 0 || args.s0 <= 0) {
+        return;
+    }
+
+    const int32_t taps = phase < args.K ? (args.K - phase + args.s0 - 1) / args.s0 : 0;
+    const int32_t k_total = taps * args.IC;
+    const bool valid_output = out_t >= 0 && out_t < args.OL && out_channel < args.OC;
+
+    float acc = 0.0f;
+    for (int32_t k0 = 0; k0 < k_total; k0 += K_TILE) {
+        for (int32_t load = tid; load < K_TILE * T_TILE; load += NTH) {
+            const int32_t kk = load / T_TILE;
+            const int32_t tt = load - kk * T_TILE;
+            const int32_t k = k0 + kk;
+            float x = 0.0f;
+            if (k < k_total) {
+                const int32_t tap = k / args.IC;
+                const int32_t input_channel = k - tap * args.IC;
+                const int32_t in_t = col0 + tt - tap;
+                if (in_t >= 0 && in_t < args.IL) {
+                    x = input[(uint64_t) in_t          * args.input_nb0 +
+                              (uint64_t) input_channel * args.input_nb1 +
+                              (uint64_t) batch         * args.input_nb2];
+                }
+            }
+            x_tile[load] = x;
+        }
+
+        for (int32_t load = tid; load < OC_TILE * K_TILE; load += NTH) {
+            const int32_t oo = load / K_TILE;
+            const int32_t kk = load - oo * K_TILE;
+            const int32_t oc = (int32_t) tgpig.y * OC_TILE + oo;
+            const int32_t k = k0 + kk;
+            float w = 0.0f;
+            if (oc < args.OC && k < k_total) {
+                const int32_t tap = k / args.IC;
+                const int32_t input_channel = k - tap * args.IC;
+                const int32_t kernel_t = phase + tap * args.s0;
+                w = weight[(uint64_t) kernel_t      * args.weight_nb0 +
+                           (uint64_t) oc            * args.weight_nb1 +
+                           (uint64_t) input_channel * args.weight_nb2];
+            }
+            w_tile[load] = w;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (valid_output) {
+            const int32_t kend = min(K_TILE, k_total - k0);
+            for (int32_t kk = 0; kk < kend; ++kk) {
+                acc += w_tile[local_oc * K_TILE + kk] * x_tile[kk * T_TILE + local_t];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (valid_output) {
+        const float b = args.bias_ne0 == 1
+            ? bias[(uint64_t) out_channel * args.bias_nb1]
+            : bias[(uint64_t) out_channel * args.bias_nb0];
+        dst[(uint64_t) out_t       * args.dst_nb0 +
+            (uint64_t) out_channel * args.dst_nb1 +
+            (uint64_t) batch       * args.dst_nb2] = acc + b;
+    }
+}
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_tiled_t kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_f32_impl<32, 32, 64>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_tiled_t kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_f32_impl<32, 32, 128>;
+
 typedef void (conv_transpose_2d_t)(
         constant ggml_metal_kargs_conv_transpose_2d & args,
         device const float * src0,
