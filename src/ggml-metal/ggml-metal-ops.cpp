@@ -383,6 +383,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_im2col(ctx, idx);
             } break;
+        case GGML_OP_KOKORO_CONV_1D:
+            {
+                n_fuse = ggml_metal_op_kokoro_conv_1d(ctx, idx);
+            } break;
         case GGML_OP_CONV_2D:
             {
                 n_fuse = ggml_metal_op_conv_2d(ctx, idx);
@@ -3622,6 +3626,8 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
         /*.IW   =*/ IW,
         /*.IH   =*/ IH,
         /*.CHW  =*/ CHW,
+        /*.OW   =*/ OW,
+        /*.OH   =*/ OH,
         /*.s0   =*/ s0,
         /*.s1   =*/ s1,
         /*.p0   =*/ p0,
@@ -3637,14 +3643,14 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
     auto pipeline = ggml_metal_library_get_pipeline_im2col(lib, op);
 
     if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {
-        const uint64_t ntptg0 = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)/(KH*KW), N);
+        const uint64_t nth = std::min<uint64_t>(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
 
         ggml_metal_encoder_set_pipeline(enc, pipeline);
         ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
 
-        ggml_metal_encoder_dispatch_threadgroups(enc, IC, OH, OW, ntptg0, KH, KW);
+        ggml_metal_encoder_dispatch_threadgroups(enc, (CHW + nth - 1) / nth, OH * OW, N, nth, 1, 1);
     } else {
         const uint64_t n_threads = std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline), N);
         const int64_t  quotient  = N / n_threads + (N % n_threads > 0 ? 1 : 0);
@@ -3656,6 +3662,73 @@ int ggml_metal_op_im2col(ggml_metal_op_t ctx, int idx) {
 
         ggml_metal_encoder_dispatch_threadgroups(enc, quotient * CHW, OH, OW, n_threads, 1, 1);
     }
+
+    return 1;
+}
+
+int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    ggml_tensor * weight = op->src[0];
+    ggml_tensor * input  = op->src[1];
+
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type == GGML_TYPE_F32);
+
+    const int32_t s0 = ggml_get_op_params_i32(op, 0);
+    const int32_t p0 = ggml_get_op_params_i32(op, 1);
+    const int32_t d0 = ggml_get_op_params_i32(op, 2);
+
+    const int32_t output_length = (int32_t) op->ne[0];
+    const int32_t out_channels  = (int32_t) op->ne[1];
+    const int32_t batch         = (int32_t) op->ne[2];
+    const int32_t kernel        = (int32_t) weight->ne[0];
+    const int32_t in_channels   = (int32_t) weight->ne[1];
+    const int32_t input_length  = (int32_t) input->ne[0];
+    const int32_t rows          = output_length * batch;
+    const int32_t k_total       = kernel * in_channels;
+
+    ggml_metal_kargs_kokoro_conv_1d args = {
+        /* .output_length = */ output_length,
+        /* .out_channels  = */ out_channels,
+        /* .in_channels   = */ in_channels,
+        /* .batch         = */ batch,
+        /* .kernel_size   = */ kernel,
+        /* .input_length  = */ input_length,
+        /* .s0            = */ s0,
+        /* .p0            = */ p0,
+        /* .d0            = */ d0,
+        /* .input_nb0     = */ input->nb[0] / sizeof(float),
+        /* .input_nb1     = */ input->nb[1] / sizeof(float),
+        /* .input_nb2     = */ input->nb[2] / sizeof(float),
+        /* .weight_nb0    = */ weight->nb[0] / sizeof(float),
+        /* .weight_nb1    = */ weight->nb[1] / sizeof(float),
+        /* .weight_nb2    = */ weight->nb[2] / sizeof(float),
+        /* .rows          = */ rows,
+        /* .k_total       = */ k_total,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_kokoro_conv_1d(lib, op);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(weight), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(input),  2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),     3);
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+
+    ggml_metal_encoder_dispatch_threadgroups(
+        enc,
+        (out_channels + pipeline.nr1 - 1) / pipeline.nr1,
+        (rows + pipeline.nr0 - 1) / pipeline.nr0,
+        1,
+        32,
+        pipeline.nsg,
+        1);
 
     return 1;
 }
@@ -3823,6 +3896,8 @@ int ggml_metal_op_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
     GGML_TENSOR_LOCALS(uint64_t, nb,  op,         nb);
 
     const int32_t s0 = ((const int32_t *)(op->op_params))[0];
+    const int32_t p0 = ((const int32_t *)(op->op_params))[1];
+    const int32_t g0 = ((const int32_t *)(op->op_params))[4];
 
     const int32_t IC = op->src[1]->ne[1];
     const int32_t IL = op->src[1]->ne[0];
@@ -3834,9 +3909,16 @@ int ggml_metal_op_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
 
     ggml_metal_kargs_conv_transpose_1d args = {
         /*.IC  =*/ IC,
+        /*.OC  =*/ (int32_t) op->src[0]->ne[1],
         /*.IL  =*/ IL,
+        /*.OL  =*/ OL,
         /*.K   =*/ K,
         /*.s0  =*/ s0,
+        /*.p0  =*/ p0,
+        /*.g0  =*/ g0,
+        /*.nb01 =*/ nb01 / nb00,
+        /*.nb02 =*/ nb02 / nb00,
+        /*.nb11 =*/ nb11 / nb10,
         /*.nb0 =*/ nb0,
         /*.nb1 =*/ nb1,
     };
@@ -3849,7 +3931,8 @@ int ggml_metal_op_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
 
-    ggml_metal_encoder_dispatch_threadgroups(enc, OL, OC, 1, 1, 1, 1);
+    constexpr int nth = 128;
+    ggml_metal_encoder_dispatch_threadgroups(enc, (OL + nth - 1) / nth, OC, 1, nth, 1, 1);
 
     return 1;
 }

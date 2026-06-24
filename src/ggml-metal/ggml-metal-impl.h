@@ -596,9 +596,16 @@ typedef struct {
 
 typedef struct {
     int32_t  IC;
+    int32_t  OC;
     int32_t  IL;
+    int32_t  OL;
     int32_t  K;
     int32_t  s0;
+    int32_t  p0;
+    int32_t  g0;
+    uint64_t nb01;
+    uint64_t nb02;
+    uint64_t nb11;
     uint64_t nb0;
     uint64_t nb1;
 } ggml_metal_kargs_conv_transpose_1d;
@@ -652,6 +659,8 @@ typedef struct {
     int32_t  IW;
     int32_t  IH;
     int32_t  CHW;
+    int32_t  OW;
+    int32_t  OH;
     int32_t  s0;
     int32_t  s1;
     int32_t  p0;
@@ -663,6 +672,26 @@ typedef struct {
     int32_t  KW;
     int32_t  KHW; // KH * KW, pre-computed on CPU to save GPU resources
 } ggml_metal_kargs_im2col;
+
+typedef struct {
+    int32_t  output_length;
+    int32_t  out_channels;
+    int32_t  in_channels;
+    int32_t  batch;
+    int32_t  kernel_size;
+    int32_t  input_length;
+    int32_t  s0;
+    int32_t  p0;
+    int32_t  d0;
+    uint64_t input_nb0;
+    uint64_t input_nb1;
+    uint64_t input_nb2;
+    uint64_t weight_nb0;
+    uint64_t weight_nb1;
+    uint64_t weight_nb2;
+    int32_t  rows;
+    int32_t  k_total;
+} ggml_metal_kargs_kokoro_conv_1d;
 
 typedef struct {
     int32_t  IW;
