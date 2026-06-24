@@ -1,5 +1,9 @@
 #version 450
 
+#if defined(GGML_CONV_TRANSPOSE_1D_FLOAT16)
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
 #include "types.glsl"
 
 layout (binding = 0) readonly buffer A {A_TYPE data_a[];};   // kernel: [K, Cout, Cin]

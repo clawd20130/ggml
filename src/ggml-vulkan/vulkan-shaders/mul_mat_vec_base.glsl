@@ -90,6 +90,33 @@ layout (constant_id = 0) const uint BLOCK_SIZE = 32;
 layout (constant_id = 1) const uint NUM_ROWS = 1;
 layout (constant_id = 2) const uint NUM_COLS = 1;
 
+// Based on the same Hastings-style approximation used by geglu_erf.comp.
+float mat_vec_gelu_erf(float a) {
+    const float p_erf  = 0.3275911f;
+    const float a1_erf = 0.254829592f;
+    const float a2_erf = -0.284496736f;
+    const float a3_erf = 1.421413741f;
+    const float a4_erf = -1.453152027f;
+    const float a5_erf = 1.061405429f;
+    const float sqrt_2_inv = 0.70710678118654752440084436210484f;
+
+    const float a_div_sqr2 = a * sqrt_2_inv;
+    const float sign_x = sign(a_div_sqr2);
+    const float x = abs(a_div_sqr2);
+    const float t = 1.0f / (1.0f + p_erf * x);
+    const float y = 1.0f - (((((a5_erf * t + a4_erf) * t) + a3_erf) * t + a2_erf) * t + a1_erf) * t * exp(-x * x);
+    const float erf_approx = sign_x * y;
+
+    return 0.5f * a * (1.0f + erf_approx);
+}
+
+FLOAT_TYPE mat_vec_apply_output_fusion(FLOAT_TYPE x) {
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_GELU_ERF) != 0) {
+        return FLOAT_TYPE(mat_vec_gelu_erf(float(x)));
+    }
+    return x;
+}
+
 #ifdef USE_SUBGROUP_ADD_NO_SHMEM
 void reduce_result(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t d_offset, const in uint32_t first_row, const in uint32_t num_rows, const in uint32_t tid) {
     [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
@@ -121,6 +148,7 @@ void reduce_result(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t 
                     temp[j][n] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
 #endif
+                temp[j][n] = mat_vec_apply_output_fusion(temp[j][n]);
                 data_d[j*p.batch_stride_d + d_offset + first_row + n] = D_TYPE(temp[j][n]);
             }
         }
@@ -176,6 +204,7 @@ void reduce_result(FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t d_offs
                     temp[j][n] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
 #endif
+                temp[j][n] = mat_vec_apply_output_fusion(temp[j][n]);
                 data_d[j*p.batch_stride_d + d_offset + first_row + n] = D_TYPE(temp[j][n]);
             }
         }
@@ -221,6 +250,7 @@ void reduce_result(FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t d_offs
                     tmpsh[j][n][0] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
 #endif
+                tmpsh[j][n][0] = mat_vec_apply_output_fusion(tmpsh[j][n][0]);
                 data_d[j*p.batch_stride_d + d_offset + first_row + n] = D_TYPE(tmpsh[j][n][0]);
             }
         }

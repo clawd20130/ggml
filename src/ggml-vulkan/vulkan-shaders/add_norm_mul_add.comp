@@ -1,0 +1,79 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+#define BLOCK_SIZE 512
+
+layout (push_constant) uniform parameter {
+    uint ne;
+    uint ne00; uint ne01; uint ne02; uint ne03;
+    uint nb00; uint nb01; uint nb02; uint nb03;
+    uint ne10; uint ne11; uint ne12; uint ne13;
+    uint nb10; uint nb11; uint nb12; uint nb13;
+    uint ne20; uint ne21; uint ne22; uint ne23;
+    uint nb20; uint nb21; uint nb22; uint nb23;
+    uint misalign_offsets;
+    float param1;
+    float param2;
+    int param3;
+} p;
+
+layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A {float data_a[];};
+layout (binding = 1) readonly buffer B {float data_b[];};
+layout (binding = 2) readonly buffer W {float data_w[];};
+layout (binding = 3) readonly buffer C {float data_c[];};
+layout (binding = 4) writeonly buffer D {float data_d[];};
+
+shared vec2 sum[BLOCK_SIZE];
+
+uint get_aoffset() {
+    return p.misalign_offsets >> 16;
+}
+
+uint get_boffset() {
+    return (p.misalign_offsets >> 8) & 0xFF;
+}
+
+uint get_doffset() {
+    return p.misalign_offsets & 0xFF;
+}
+
+void main() {
+    const uint row = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+
+    sum[tid] = vec2(0.0f, 0.0f);
+
+    const uint a_row = row * p.nb01 + get_aoffset();
+    const uint b_row = row * p.nb11 + get_boffset();
+    const uint d_row = row * p.nb21 + get_doffset();
+
+    [[unroll]] for (uint col = tid; col < p.ne00; col += BLOCK_SIZE) {
+        const float xi = data_a[a_row + col * p.nb00] + data_b[b_row + col * p.nb10];
+        sum[tid].x += xi;
+        sum[tid].y += xi * xi;
+    }
+
+    barrier();
+    [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sum[tid] += sum[tid + s];
+        }
+        barrier();
+    }
+
+    const float mean = sum[0].x / p.ne00;
+    const float var = sum[0].y / p.ne00 - mean * mean;
+    const float inv_std = inversesqrt(var + p.param1);
+
+    [[unroll]] for (uint col = tid; col < p.ne00; col += BLOCK_SIZE) {
+        const float xi = data_a[a_row + col * p.nb00] + data_b[b_row + col * p.nb10];
+        const float w = data_w[col];
+        const float b = data_c[col];
+        const float normalized = uintBitsToFloat(floatBitsToUint((xi - mean) * inv_std));
+        const float scaled = uintBitsToFloat(floatBitsToUint(normalized * w));
+        const float out_value = uintBitsToFloat(floatBitsToUint(scaled + b));
+        data_d[d_row + col * p.nb20] = out_value;
+    }
+}
