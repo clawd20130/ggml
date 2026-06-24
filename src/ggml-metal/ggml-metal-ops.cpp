@@ -32,26 +32,68 @@ struct ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config {
     int t_tile;
     int oc_tile;
     int k_tile;
+    bool simdgroup;
 };
 
-static ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config() {
+static const char * ggml_metal_style_bert_vits2_conv_transpose_1d_aot_kernel_name(
+        int32_t kernel,
+        int32_t stride,
+        int32_t input_channels,
+        int32_t crop) {
+    if (kernel == 16 && stride == 8 && input_channels == 512 && crop == 4) {
+        return "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic512_crop4_f32";
+    }
+    if (kernel == 16 && stride == 8 && input_channels == 256 && crop == 4) {
+        return "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic256_crop4_f32";
+    }
+    if (kernel == 8 && stride == 2 && input_channels == 128 && crop == 3) {
+        return "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k8_s2_ic128_crop3_f32";
+    }
+    if (kernel == 2 && stride == 2 && input_channels == 64 && crop == 0) {
+        return "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic64_crop0_f32";
+    }
+    if (kernel == 2 && stride == 2 && input_channels == 32 && crop == 0) {
+        return "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic32_crop0_f32";
+    }
+    return nullptr;
+}
+
+static ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config(
+        int32_t kernel,
+        int32_t stride,
+        int32_t input_channels,
+        int32_t crop) {
     const char * env = std::getenv("STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL");
     if (!env || !env[0]) {
-        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+        const char * aot_kernel = ggml_metal_style_bert_vits2_conv_transpose_1d_aot_kernel_name(kernel, stride, input_channels, crop);
+        return { aot_kernel ? aot_kernel : "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32",
+            aot_kernel ? 64 : 32,
+            32,
+            aot_kernel ? 32 : 128,
+            aot_kernel != nullptr };
     }
     if (std::strcmp(env, "scalar") == 0) {
-        return { nullptr, 0, 0, 0 };
+        return { nullptr, 0, 0, 0, false };
     }
     if (std::strcmp(env, "phase") == 0 || std::strcmp(env, "phase_tiled") == 0) {
-        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128, false };
     }
     if (std::strcmp(env, "phase_32x32_k64") == 0) {
-        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64 };
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64, false };
     }
     if (std::strcmp(env, "phase_32x32_k128") == 0) {
-        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128 };
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128, false };
     }
-    return { nullptr, 0, 0, 0 };
+    if (std::strcmp(env, "simdgroup") == 0 || std::strcmp(env, "simdgroup_half") == 0 ||
+        std::strcmp(env, "phase_simdgroup") == 0 || std::strcmp(env, "phase_simdgroup_half") == 0) {
+        return { "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32", 64, 32, 32, true };
+    }
+    if (std::strcmp(env, "aot") == 0 || std::strcmp(env, "simdgroup_aot") == 0 ||
+        std::strcmp(env, "simdgroup_half_aot") == 0 || std::strcmp(env, "phase_simdgroup_half_aot") == 0) {
+        const char * aot_kernel = ggml_metal_style_bert_vits2_conv_transpose_1d_aot_kernel_name(kernel, stride, input_channels, crop);
+        return { aot_kernel ? aot_kernel : "kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32", 64, 32, 32, true };
+    }
+    return { nullptr, 0, 0, 0, false };
 }
 
 struct ggml_metal_op {
@@ -3989,12 +4031,15 @@ int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int id
     const int32_t p0    = ggml_get_op_params_i32(op, 1);
     const int32_t g0    = ggml_get_op_params_i32(op, 4);
     const int32_t crop0 = ggml_get_op_params_i32(op, 5);
+    const float pre_relu_slope = ggml_get_op_params_f32(op, 6);
 
     const int32_t IC = (int32_t) input->ne[1];
     const int32_t IL = (int32_t) input->ne[0];
     const int32_t K  = (int32_t) weight->ne[0];
     const int32_t OL = (int32_t) op->ne[0];
     const int32_t OC = (int32_t) op->ne[1];
+    const int32_t B  = (int32_t) op->ne[2];
+    const int32_t cols_per_phase = (OL + crop0 + s0 - 1) / s0;
 
     ggml_metal_kargs_style_bert_vits2_conv_transpose_1d args = {
         /* .IC         = */ IC,
@@ -4018,27 +4063,37 @@ int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int id
         /* .dst_nb0    = */ op->nb[0] / sizeof(float),
         /* .dst_nb1    = */ op->nb[1] / sizeof(float),
         /* .dst_nb2    = */ op->nb[2] / sizeof(float),
+        /* .batch      = */ B,
+        /* .phase_cols = */ cols_per_phase,
+        /* .pre_relu_slope = */ pre_relu_slope,
     };
 
     ggml_metal_style_bert_vits2_conv_transpose_1d_phase_tiled_config phase_tiled =
-        ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config();
+        ggml_metal_style_bert_vits2_conv_transpose_1d_get_phase_tiled_config(K, s0, IC, crop0);
     const ggml_metal_device_props * props_dev = ggml_metal_device_get_props(ctx->dev);
+    if (phase_tiled.simdgroup && !props_dev->has_simdgroup_mm) {
+        phase_tiled = { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32", 32, 32, 128, false };
+    }
     size_t phase_tiled_smem = phase_tiled.kernel_name
-        ? ((size_t) phase_tiled.k_tile * (size_t) phase_tiled.t_tile +
-           (size_t) phase_tiled.oc_tile * (size_t) phase_tiled.k_tile) * sizeof(float)
+        ? (phase_tiled.simdgroup
+            ? (size_t) 8192
+            : ((size_t) phase_tiled.k_tile * (size_t) phase_tiled.t_tile +
+               (size_t) phase_tiled.oc_tile * (size_t) phase_tiled.k_tile) * sizeof(float))
         : 0;
     if (phase_tiled.kernel_name && phase_tiled_smem > props_dev->max_theadgroup_memory_size) {
-        phase_tiled = { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64 };
+        phase_tiled = { "kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k64_f32", 32, 32, 64, false };
         phase_tiled_smem = ((size_t) phase_tiled.k_tile * (size_t) phase_tiled.t_tile +
                             (size_t) phase_tiled.oc_tile * (size_t) phase_tiled.k_tile) * sizeof(float);
     }
     if (phase_tiled.kernel_name && phase_tiled_smem > props_dev->max_theadgroup_memory_size) {
-        phase_tiled = { nullptr, 0, 0, 0 };
+        phase_tiled = { nullptr, 0, 0, 0, false };
     }
     const bool use_phase_tiled = phase_tiled.kernel_name && p0 == 0 && g0 == 1 && s0 > 0;
 
     auto pipeline = use_phase_tiled
-        ? ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d_phase_tiled(lib, op, phase_tiled.kernel_name)
+        ? (phase_tiled.simdgroup
+            ? ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d_phase_simdgroup(lib, op, phase_tiled.kernel_name)
+            : ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d_phase_tiled(lib, op, phase_tiled.kernel_name))
         : ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d(lib, op);
 
     ggml_metal_encoder_set_pipeline(enc, pipeline);
@@ -4048,16 +4103,26 @@ int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int id
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bias),   3);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),     4);
 
-    if (use_phase_tiled) {
+    if (use_phase_tiled && phase_tiled.simdgroup) {
+        ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+        const int32_t rows = cols_per_phase * B;
+        ggml_metal_encoder_dispatch_threadgroups(
+            enc,
+            (OC + pipeline.nr1 - 1) / pipeline.nr1,
+            (rows + pipeline.nr0 - 1) / pipeline.nr0,
+            s0,
+            32,
+            pipeline.nsg,
+            1);
+    } else if (use_phase_tiled) {
         const int t_tile = phase_tiled.t_tile;
         const int oc_tile = phase_tiled.oc_tile;
         const int nth = t_tile * oc_tile;
-        const int32_t cols_per_phase = (OL + crop0 + s0 - 1) / s0;
         ggml_metal_encoder_dispatch_threadgroups(
             enc,
             (cols_per_phase + t_tile - 1) / t_tile,
             (OC + oc_tile - 1) / oc_tile,
-            (int32_t) op->ne[2] * s0,
+            B * s0,
             nth,
             1,
             1);

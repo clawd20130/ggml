@@ -6478,6 +6478,21 @@ struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d(
         int                   op0,
         int                   g0,
         int                   crop0) {
+    return ggml_style_bert_vits2_conv_transpose_1d_ex(ctx, weight, input, bias, s0, p0, d0, op0, g0, crop0, -1.0f);
+}
+
+struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * weight,
+        struct ggml_tensor  * input,
+        struct ggml_tensor  * bias,
+        int                   s0,
+        int                   p0,
+        int                   d0,
+        int                   op0,
+        int                   g0,
+        int                   crop0,
+        float                 pre_relu_slope) {
     GGML_ASSERT(weight->type == GGML_TYPE_F32);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
     GGML_ASSERT(bias->type == GGML_TYPE_F32);
@@ -6508,7 +6523,8 @@ struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d(
     };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
-    int32_t params[] = { s0, p0, d0, op0, g0, crop0 };
+    int32_t params[] = { s0, p0, d0, op0, g0, crop0, 0 };
+    memcpy((float *) params + 6, &pre_relu_slope, sizeof(float));
     ggml_set_op_params(result, params, sizeof(params));
 
     result->op     = GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D;

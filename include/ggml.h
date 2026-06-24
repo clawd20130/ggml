@@ -2673,6 +2673,19 @@ extern "C" {
             int                   g0,
             int                   crop0);
 
+    GGML_API struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * input,
+            struct ggml_tensor  * bias,
+            int                   s0,
+            int                   p0,
+            int                   d0,
+            int                   op0,
+            int                   g0,
+            int                   crop0,
+            float                 pre_relu_slope);
+
     // Kokoro-specific fused transpose + Snake1D activation. Expects:
     // alpha: [1, channels] or [channels]
     // input: [channels, length, batch]

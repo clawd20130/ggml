@@ -5009,6 +5009,10 @@ kernel void kernel_conv_transpose_1d<half>(
     uint3    tgpg[[threadgroups_per_grid]],
     uint3    tpig[[thread_position_in_grid]]);
 
+static inline float style_bert_vits2_conv_transpose_pre_relu(float x, float slope) {
+    return slope >= 0.0f && x < 0.0f ? x * slope : x;
+}
+
 kernel void kernel_style_bert_vits2_conv_transpose_1d_f32(
         constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
         device const float * weight,
@@ -5048,7 +5052,7 @@ kernel void kernel_style_bert_vits2_conv_transpose_1d_f32(
             const float x = input [(uint64_t) in_t          * args.input_nb0 +
                                    (uint64_t) input_channel * args.input_nb1 +
                                    (uint64_t) batch         * args.input_nb2];
-            v += k * x;
+            v += k * style_bert_vits2_conv_transpose_pre_relu(x, args.pre_relu_slope);
         }
     }
 
@@ -5119,6 +5123,7 @@ kernel void kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_f32_impl(
                     x = input[(uint64_t) in_t          * args.input_nb0 +
                               (uint64_t) input_channel * args.input_nb1 +
                               (uint64_t) batch         * args.input_nb2];
+                    x = style_bert_vits2_conv_transpose_pre_relu(x, args.pre_relu_slope);
                 }
             }
             x_tile[load] = x;
@@ -5168,6 +5173,204 @@ kernel style_bert_vits2_conv_transpose_1d_phase_tiled_t kernel_style_bert_vits2_
 
 template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_t32_oc32_k128_f32")]]
 kernel style_bert_vits2_conv_transpose_1d_phase_tiled_t kernel_style_bert_vits2_conv_transpose_1d_phase_tiled_f32_impl<32, 32, 128>;
+
+template<int K_CONST, int S_CONST, int IC_CONST, int CROP_CONST, bool USE_AOT>
+kernel void kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl(
+        constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
+        device const float * weight,
+        device const float * input,
+        device const float * bias,
+        device       float * dst,
+        threadgroup  char  * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    constexpr int NR0 = 64;
+    constexpr int NR1 = 32;
+    constexpr int NK  = 32;
+    constexpr int NL0 = NK/16;
+    constexpr int NL1 = NK/8;
+
+    const int s0 = USE_AOT ? S_CONST : args.s0;
+    const int kernel_size = USE_AOT ? K_CONST : args.K;
+    const int in_channels = USE_AOT ? IC_CONST : args.IC;
+    const int crop0 = USE_AOT ? CROP_CONST : args.crop0;
+
+    if (args.g0 != 1 || args.p0 != 0 || s0 <= 0) {
+        return;
+    }
+
+    const int phase = (int) tgpig.z;
+    const int rows = args.phase_cols * args.batch;
+    const int r0 = (int) tgpig.y*NR0;
+    const int r1 = (int) tgpig.x*NR1;
+
+    if (rows <= 0 || r0 >= rows || r1 >= args.OC) {
+        return;
+    }
+
+    const short nr0 = (rows    - r0 < NR0) ? (rows    - r0) : NR0;
+    const short nr1 = (args.OC - r1 < NR1) ? (args.OC - r1) : NR1;
+
+    const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1;
+    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1;
+    const short il0 = tiitg % NL0;
+
+    const int row = r0 + lr0;
+    const int col = row % args.phase_cols;
+    const int batch = row / args.phase_cols;
+    const short iy = 8*(tiitg % NL1);
+
+    const int taps = phase < kernel_size ? (kernel_size - phase + s0 - 1) / s0 : 0;
+    const int k_total = taps * in_channels;
+
+    simdgroup_half8x8 ma[4];
+    simdgroup_half8x8 mb[2];
+    simdgroup_float8x8 mc[8];
+
+    for (short i = 0; i < 8; i++) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (int loop_k = 0; loop_k < k_total; loop_k += NK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (short i = 0; i < 16; i++) {
+            const short sx = 2*il0 + i/8;
+            const short sy = (tiitg/NL0)/8;
+            const short lx = (tiitg/NL0)%8;
+            const short ly = i%8;
+            const short ib = 8*sx + sy;
+            const int k = loop_k + 16*il0 + i;
+
+            half v = (half) 0.0f;
+            if (row < rows && k < k_total) {
+                const int tap = k / in_channels;
+                const int input_channel = k - tap*in_channels;
+                const int in_t = col - tap;
+                if (in_t >= 0 && in_t < args.IL) {
+                    const float x = input[(uint64_t) in_t          * args.input_nb0 +
+                                          (uint64_t) input_channel * args.input_nb1 +
+                                          (uint64_t) batch         * args.input_nb2];
+                    v = (half) style_bert_vits2_conv_transpose_pre_relu(x, args.pre_relu_slope);
+                }
+            }
+            *(sa + 64*ib + 8*ly + lx) = v;
+        }
+
+        for (short i = 0; i < 8; i++) {
+            const short sx = tiitg%NL1;
+            const short sy = (tiitg/NL1)/8;
+            const short lx = i;
+            const short ly = (tiitg/NL1)%8;
+            const short ib = 4*sx + sy;
+            const int k = loop_k + iy + i;
+
+            half v = (half) 0.0f;
+            if (r1 + lr1 < args.OC && k < k_total) {
+                const int tap = k / in_channels;
+                const int input_channel = k - tap*in_channels;
+                const int kernel_t = phase + tap*s0;
+                v = (half) weight[(uint64_t) kernel_t      * args.weight_nb0 +
+                                  (uint64_t) (r1 + lr1)    * args.weight_nb1 +
+                                  (uint64_t) input_channel * args.weight_nb2];
+            }
+            *(sb + 64*ib + 8*ly + lx) = v;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4*64*(sgitg%2);
+        threadgroup const half * lsmb = sb + 2*64*(sgitg/2);
+
+        FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; i++) {
+                simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 2; i++) {
+                simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 8; i++) {
+                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+            }
+
+            lsma += 8*64;
+            lsmb += 4*64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+
+    for (short i = 0; i < 8; i++) {
+        simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += NR1) {
+            const int out_channel = r1 + j;
+            const float b = args.bias_ne0 == 1
+                ? bias[(uint64_t) out_channel * args.bias_nb1]
+                : bias[(uint64_t) out_channel * args.bias_nb0];
+            threadgroup float * C = ((threadgroup float *) shmem) + j*NR0;
+
+            for (int i = 0; i < nr0; ++i) {
+                const int out_row = r0 + i;
+                const int out_col = out_row % args.phase_cols;
+                const int out_batch = out_row / args.phase_cols;
+                const int out_t = phase + out_col*s0 - crop0;
+                if (out_t >= 0 && out_t < args.OL && out_batch < args.batch) {
+                    dst[(uint64_t) out_t       * args.dst_nb0 +
+                        (uint64_t) out_channel * args.dst_nb1 +
+                        (uint64_t) out_batch   * args.dst_nb2] = C[i] + b;
+                }
+            }
+        }
+    }
+}
+
+typedef void (style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t)(
+        constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
+        device const float * weight,
+        device const float * input,
+        device const float * bias,
+        device       float * dst,
+        threadgroup  char  * shmem,
+        uint3  tgpig,
+        ushort tiitg,
+        ushort sgitg);
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<1, 1, 1, 0, false>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic512_crop4_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<16, 8, 512, 4, true>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic256_crop4_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<16, 8, 256, 4, true>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k8_s2_ic128_crop3_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<8, 2, 128, 3, true>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic64_crop0_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<2, 2, 64, 0, true>;
+
+template [[host_name("kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic32_crop0_f32")]]
+kernel style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_t kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_f32_impl<2, 2, 32, 0, true>;
 
 typedef void (conv_transpose_2d_t)(
         constant ggml_metal_kargs_conv_transpose_2d & args,

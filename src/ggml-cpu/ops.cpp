@@ -11157,6 +11157,8 @@ static void ggml_compute_forward_style_bert_vits2_conv_transpose_1d_f32(
     const int32_t p0    = ggml_get_op_params_i32(dst, 1);
     const int32_t g0    = ggml_get_op_params_i32(dst, 4);
     const int32_t crop0 = ggml_get_op_params_i32(dst, 5);
+    const float pre_relu_slope = ggml_get_op_params_f32(dst, 6);
+    const bool use_pre_relu = pre_relu_slope >= 0.0f;
 
     GGML_ASSERT(g0 == 1);
     GGML_ASSERT(s0 > 0);
@@ -11193,7 +11195,8 @@ static void ggml_compute_forward_style_bert_vits2_conv_transpose_1d_f32(
                     kernel_t * weight->nb[0] + oc * weight->nb[1] + ic * weight->nb[2]);
                 const float x = *(const float *)((const char *)input->data +
                     in_t * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
-                sum += w * x;
+                const float ax = use_pre_relu && x < 0.0f ? x * pre_relu_slope : x;
+                sum += w * ax;
             }
         }
 

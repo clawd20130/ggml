@@ -632,6 +632,9 @@ typedef struct {
     uint64_t dst_nb0;
     uint64_t dst_nb1;
     uint64_t dst_nb2;
+    int32_t  batch;
+    int32_t  phase_cols;
+    float    pre_relu_slope;
 } ggml_metal_kargs_style_bert_vits2_conv_transpose_1d;
 
 typedef struct {
