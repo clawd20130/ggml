@@ -571,6 +571,7 @@ extern "C" {
         GGML_OP_KOKORO_LSTM_SCAN,
         GGML_OP_KOKORO_LSTM_STEP,
         GGML_OP_KOKORO_CONV_1D,
+        GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D,
         GGML_OP_KOKORO_SNAKE_1D_T,
         GGML_OP_KOKORO_ADAIN_SNAKE_1D_T,
 
@@ -2653,6 +2654,24 @@ extern "C" {
             int                   s0,
             int                   p0,
             int                   d0);
+
+    // Style-Bert-VITS2-specific fused ConvTranspose1D + crop + bias.
+    // Expects:
+    // weight: [kernel, out_channels, in_channels]
+    // input: [input_length, in_channels, batch]
+    // bias: [1, out_channels] or [out_channels]
+    // Returns [cropped_output_length, out_channels, batch].
+    GGML_API struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * input,
+            struct ggml_tensor  * bias,
+            int                   s0,
+            int                   p0,
+            int                   d0,
+            int                   op0,
+            int                   g0,
+            int                   crop0);
 
     // Kokoro-specific fused transpose + Snake1D activation. Expects:
     // alpha: [1, channels] or [channels]

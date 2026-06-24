@@ -2079,6 +2079,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_kokoro_conv_1d(params, tensor);
             } break;
+        case GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D:
+            {
+                ggml_compute_forward_style_bert_vits2_conv_transpose_1d(params, tensor);
+            } break;
         case GGML_OP_KOKORO_SNAKE_1D_T:
             {
                 ggml_compute_forward_kokoro_snake_1d_t(params, tensor);
@@ -2269,6 +2273,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_GATED_DELTA_NET:
         case GGML_OP_KOKORO_LSTM_STEP:
         case GGML_OP_KOKORO_CONV_1D:
+        case GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D:
         case GGML_OP_KOKORO_SNAKE_1D_T:
         case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
             {
@@ -3013,6 +3018,7 @@ struct ggml_cplan ggml_graph_plan(
                     } break;
                 case GGML_OP_KOKORO_LSTM_STEP:
                 case GGML_OP_KOKORO_CONV_1D:
+                case GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D:
                 case GGML_OP_KOKORO_SNAKE_1D_T:
                 case GGML_OP_KOKORO_ADAIN_SNAKE_1D_T:
                     {

@@ -1067,6 +1067,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "KOKORO_LSTM_SCAN",
     "KOKORO_LSTM_STEP",
     "KOKORO_CONV_1D",
+    "STYLE_BERT_VITS2_CONV_TRANSPOSE_1D",
     "KOKORO_SNAKE_1D_T",
     "KOKORO_ADAIN_SNAKE_1D_T",
 
@@ -1090,7 +1091,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "AA_ISTFT",
 };
 
-static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1187,6 +1188,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "kokoro_lstm_scan(x, w, b, h0, c0)",
     "kokoro_lstm_step(x, r, b, c0)",
     "kokoro_conv_1d(w, x)",
+    "style_bert_vits2_conv_transpose_1d(w, x, b)",
     "kokoro_snake_1d_t(alpha, x)",
     "kokoro_adain_snake_1d_t(alpha, x, gamma, beta)",
 
@@ -1210,7 +1212,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "aa_istft(x)",
 };
 
-static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6459,6 +6461,60 @@ struct ggml_tensor * ggml_kokoro_conv_1d(
     result->op     = GGML_OP_KOKORO_CONV_1D;
     result->src[0] = weight;
     result->src[1] = input;
+
+    return result;
+}
+
+// ggml_style_bert_vits2_conv_transpose_1d
+
+struct ggml_tensor * ggml_style_bert_vits2_conv_transpose_1d(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * weight,
+        struct ggml_tensor  * input,
+        struct ggml_tensor  * bias,
+        int                   s0,
+        int                   p0,
+        int                   d0,
+        int                   op0,
+        int                   g0,
+        int                   crop0) {
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(weight));
+    GGML_ASSERT(ggml_is_contiguous(input));
+    GGML_ASSERT(ggml_is_contiguous(bias));
+    GGML_ASSERT(weight->ne[2] == input->ne[1]);
+    GGML_ASSERT(weight->ne[3] == 1);
+    GGML_ASSERT(input->ne[3] == 1);
+    GGML_ASSERT(s0 > 0);
+    GGML_ASSERT(p0 >= 0);
+    GGML_ASSERT(d0 == 1);
+    GGML_ASSERT(op0 == 0);
+    GGML_ASSERT(g0 == 1);
+    GGML_ASSERT(crop0 >= 0);
+    GGML_ASSERT(bias->ne[0] == 1 || bias->ne[0] == weight->ne[1]);
+    GGML_ASSERT(bias->ne[0] == weight->ne[1] || bias->ne[1] == weight->ne[1]);
+
+    const int64_t full_output_length =
+        ggml_calc_conv_transpose_1d_output_size(input->ne[0], weight->ne[0], s0, p0, d0, op0);
+    GGML_ASSERT(full_output_length > 2 * crop0);
+
+    const int64_t ne[4] = {
+        full_output_length - 2 * crop0,
+        weight->ne[1],
+        input->ne[2],
+        1,
+    };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    int32_t params[] = { s0, p0, d0, op0, g0, crop0 };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D;
+    result->src[0] = weight;
+    result->src[1] = input;
+    result->src[2] = bias;
 
     return result;
 }

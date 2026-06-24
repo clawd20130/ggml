@@ -395,6 +395,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_conv_transpose_1d(ctx, idx);
             } break;
+        case GGML_OP_STYLE_BERT_VITS2_CONV_TRANSPOSE_1D:
+            {
+                n_fuse = ggml_metal_op_style_bert_vits2_conv_transpose_1d(ctx, idx);
+            } break;
         case GGML_OP_CONV_TRANSPOSE_2D:
             {
                 n_fuse = ggml_metal_op_conv_transpose_2d(ctx, idx);
@@ -3933,6 +3937,78 @@ int ggml_metal_op_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
 
     constexpr int nth = 128;
     ggml_metal_encoder_dispatch_threadgroups(enc, (OL + nth - 1) / nth, OC, 1, nth, 1, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_style_bert_vits2_conv_transpose_1d(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    ggml_tensor * weight = op->src[0];
+    ggml_tensor * input  = op->src[1];
+    ggml_tensor * bias   = op->src[2];
+
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->type == GGML_TYPE_F32);
+
+    const int32_t s0    = ggml_get_op_params_i32(op, 0);
+    const int32_t p0    = ggml_get_op_params_i32(op, 1);
+    const int32_t g0    = ggml_get_op_params_i32(op, 4);
+    const int32_t crop0 = ggml_get_op_params_i32(op, 5);
+
+    const int32_t IC = (int32_t) input->ne[1];
+    const int32_t IL = (int32_t) input->ne[0];
+    const int32_t K  = (int32_t) weight->ne[0];
+    const int32_t OL = (int32_t) op->ne[0];
+    const int32_t OC = (int32_t) op->ne[1];
+
+    ggml_metal_kargs_style_bert_vits2_conv_transpose_1d args = {
+        /* .IC         = */ IC,
+        /* .OC         = */ OC,
+        /* .IL         = */ IL,
+        /* .OL         = */ OL,
+        /* .K          = */ K,
+        /* .s0         = */ s0,
+        /* .p0         = */ p0,
+        /* .g0         = */ g0,
+        /* .crop0      = */ crop0,
+        /* .bias_ne0   = */ (int32_t) bias->ne[0],
+        /* .input_nb0  = */ input->nb[0] / sizeof(float),
+        /* .input_nb1  = */ input->nb[1] / sizeof(float),
+        /* .input_nb2  = */ input->nb[2] / sizeof(float),
+        /* .weight_nb0 = */ weight->nb[0] / sizeof(float),
+        /* .weight_nb1 = */ weight->nb[1] / sizeof(float),
+        /* .weight_nb2 = */ weight->nb[2] / sizeof(float),
+        /* .bias_nb0   = */ bias->nb[0] / sizeof(float),
+        /* .bias_nb1   = */ bias->nb[1] / sizeof(float),
+        /* .dst_nb0    = */ op->nb[0] / sizeof(float),
+        /* .dst_nb1    = */ op->nb[1] / sizeof(float),
+        /* .dst_nb2    = */ op->nb[2] / sizeof(float),
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_style_bert_vits2_conv_transpose_1d(lib, op);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(weight), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(input),  2);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bias),   3);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),     4);
+
+    constexpr int nth = 128;
+    ggml_metal_encoder_dispatch_threadgroups(
+        enc,
+        (OL + nth - 1) / nth,
+        OC,
+        (int32_t) op->ne[2],
+        nth,
+        1,
+        1);
 
     return 1;
 }

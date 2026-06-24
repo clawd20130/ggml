@@ -11132,6 +11132,93 @@ void ggml_compute_forward_kokoro_conv_1d(
     }
 }
 
+// ggml_compute_forward_style_bert_vits2_conv_transpose_1d
+
+static void ggml_compute_forward_style_bert_vits2_conv_transpose_1d_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    const struct ggml_tensor * weight = dst->src[0];
+    const struct ggml_tensor * input  = dst->src[1];
+    const struct ggml_tensor * bias   = dst->src[2];
+
+    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t output_length = dst->ne[0];
+    const int64_t out_channels  = dst->ne[1];
+    const int64_t batch         = dst->ne[2];
+    const int64_t kernel        = weight->ne[0];
+    const int64_t in_channels   = input->ne[1];
+    const int64_t input_length  = input->ne[0];
+
+    const int32_t s0    = ggml_get_op_params_i32(dst, 0);
+    const int32_t p0    = ggml_get_op_params_i32(dst, 1);
+    const int32_t g0    = ggml_get_op_params_i32(dst, 4);
+    const int32_t crop0 = ggml_get_op_params_i32(dst, 5);
+
+    GGML_ASSERT(g0 == 1);
+    GGML_ASSERT(s0 > 0);
+    GGML_ASSERT(weight->ne[1] == out_channels);
+    GGML_ASSERT(weight->ne[2] == in_channels);
+
+    const int64_t rows = output_length * batch;
+    const int64_t total = rows * out_channels;
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t idx = ith; idx < total; idx += nth) {
+        const int64_t row = idx % rows;
+        const int64_t oc  = idx / rows;
+        const int64_t out_t = row % output_length;
+        const int64_t n = row / output_length;
+        const int64_t full_out_t = out_t + crop0;
+
+        const int64_t low = full_out_t + p0 - kernel + 1;
+        const int64_t high = full_out_t + p0;
+        int64_t in_t_start = low >= 0 ? (low + s0 - 1) / s0 : -((-low) / s0);
+        int64_t in_t_end = high >= 0 ? high / s0 : -((-high + s0 - 1) / s0);
+        in_t_start = MAX(in_t_start, 0);
+        in_t_end = MIN(in_t_end, input_length - 1);
+
+        float sum = 0.0f;
+        for (int64_t in_t = in_t_start; in_t <= in_t_end; ++in_t) {
+            const int64_t kernel_t = full_out_t - in_t * s0 + p0;
+            if (kernel_t < 0 || kernel_t >= kernel) {
+                continue;
+            }
+            for (int64_t ic = 0; ic < in_channels; ++ic) {
+                const float w = *(const float *)((const char *)weight->data +
+                    kernel_t * weight->nb[0] + oc * weight->nb[1] + ic * weight->nb[2]);
+                const float x = *(const float *)((const char *)input->data +
+                    in_t * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
+                sum += w * x;
+            }
+        }
+
+        const float b = bias->ne[0] == 1
+            ? *(const float *)((const char *)bias->data + oc * bias->nb[1])
+            : *(const float *)((const char *)bias->data + oc * bias->nb[0]);
+        *(float *)((char *)dst->data + out_t * dst->nb[0] + oc * dst->nb[1] + n * dst->nb[2]) = sum + b;
+    }
+}
+
+void ggml_compute_forward_style_bert_vits2_conv_transpose_1d(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->src[0]->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_style_bert_vits2_conv_transpose_1d_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 // ggml_compute_forward_kokoro_snake_1d_t
 
 static float ggml_kokoro_snake_alpha(const struct ggml_tensor * alpha, int64_t channel) {

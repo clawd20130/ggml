@@ -5009,6 +5009,56 @@ kernel void kernel_conv_transpose_1d<half>(
     uint3    tgpg[[threadgroups_per_grid]],
     uint3    tpig[[thread_position_in_grid]]);
 
+kernel void kernel_style_bert_vits2_conv_transpose_1d_f32(
+        constant ggml_metal_kargs_style_bert_vits2_conv_transpose_1d & args,
+        device const float * weight,
+        device const float * input,
+        device const float * bias,
+        device       float * dst,
+        uint3   tgpig[[threadgroup_position_in_grid]],
+        uint3   tgpg[[threadgroups_per_grid]],
+        uint3   tpig[[thread_position_in_grid]]) {
+
+    const int32_t out_t = tpig.x;
+    const int32_t out_channel = tgpig.y;
+    const int32_t batch = tgpig.z;
+
+    if (out_t >= args.OL || out_channel >= args.OC || args.g0 != 1 || args.s0 <= 0) {
+        return;
+    }
+
+    const int32_t full_out_t = out_t + args.crop0;
+    const int32_t low = full_out_t + args.p0 - args.K + 1;
+    const int32_t high = full_out_t + args.p0;
+    int32_t in_t_start = ceil_div_pos_den(low, args.s0);
+    int32_t in_t_end = floor_div_pos_den(high, args.s0);
+    in_t_start = max(in_t_start, 0);
+    in_t_end = min(in_t_end, args.IL - 1);
+
+    float v = 0.0f;
+    for (int32_t in_t = in_t_start; in_t <= in_t_end; ++in_t) {
+        const int32_t kernel_t = full_out_t - in_t * args.s0 + args.p0;
+        if (kernel_t < 0 || kernel_t >= args.K) {
+            continue;
+        }
+        for (int32_t input_channel = 0; input_channel < args.IC; ++input_channel) {
+            const float k = weight[(uint64_t) kernel_t      * args.weight_nb0 +
+                                   (uint64_t) out_channel   * args.weight_nb1 +
+                                   (uint64_t) input_channel * args.weight_nb2];
+            const float x = input [(uint64_t) in_t          * args.input_nb0 +
+                                   (uint64_t) input_channel * args.input_nb1 +
+                                   (uint64_t) batch         * args.input_nb2];
+            v += k * x;
+        }
+    }
+
+    const float b = args.bias_ne0 == 1
+        ? bias[(uint64_t) out_channel * args.bias_nb1]
+        : bias[(uint64_t) out_channel * args.bias_nb0];
+    dst[(uint64_t) out_t       * args.dst_nb0 +
+        (uint64_t) out_channel * args.dst_nb1 +
+        (uint64_t) batch       * args.dst_nb2] = v + b;
+}
 
 typedef void (conv_transpose_2d_t)(
         constant ggml_metal_kargs_conv_transpose_2d & args,

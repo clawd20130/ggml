@@ -612,6 +612,30 @@ typedef struct {
 
 typedef struct {
     int32_t  IC;
+    int32_t  OC;
+    int32_t  IL;
+    int32_t  OL;
+    int32_t  K;
+    int32_t  s0;
+    int32_t  p0;
+    int32_t  g0;
+    int32_t  crop0;
+    int32_t  bias_ne0;
+    uint64_t input_nb0;
+    uint64_t input_nb1;
+    uint64_t input_nb2;
+    uint64_t weight_nb0;
+    uint64_t weight_nb1;
+    uint64_t weight_nb2;
+    uint64_t bias_nb0;
+    uint64_t bias_nb1;
+    uint64_t dst_nb0;
+    uint64_t dst_nb1;
+    uint64_t dst_nb2;
+} ggml_metal_kargs_style_bert_vits2_conv_transpose_1d;
+
+typedef struct {
+    int32_t  IC;
     int32_t  IH;
     int32_t  IW;
     int32_t  KH;

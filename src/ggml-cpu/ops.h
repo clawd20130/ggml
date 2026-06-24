@@ -112,6 +112,7 @@ void ggml_compute_forward_gated_delta_net(const struct ggml_compute_params * par
 void ggml_compute_forward_kokoro_lstm_scan(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_kokoro_lstm_step(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_kokoro_conv_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_style_bert_vits2_conv_transpose_1d(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_kokoro_snake_1d_t(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_kokoro_adain_snake_1d_t(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_map_custom1(const struct ggml_compute_params * params, struct ggml_tensor * dst);
