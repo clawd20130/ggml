@@ -716,8 +716,17 @@ typedef struct {
     uint64_t weight_nb0;
     uint64_t weight_nb1;
     uint64_t weight_nb2;
+    uint64_t bias_nb0;
+    uint64_t bias_nb1;
+    uint64_t residual_nb0;
+    uint64_t residual_nb1;
+    uint64_t residual_nb2;
     int32_t  rows;
     int32_t  k_total;
+    int32_t  bias_ne0;
+    int32_t  has_bias;
+    int32_t  has_residual;
+    float    pre_relu_slope;
 } ggml_metal_kargs_kokoro_conv_1d;
 
 typedef struct {

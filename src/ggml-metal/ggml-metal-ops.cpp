@@ -3749,9 +3749,13 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
 
     ggml_tensor * weight = op->src[0];
     ggml_tensor * input  = op->src[1];
+    ggml_tensor * bias   = op->src[2];
+    ggml_tensor * res    = op->src[3];
 
     GGML_ASSERT(weight->type == GGML_TYPE_F32);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(!bias || bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(!res  || res->type  == GGML_TYPE_F32);
     GGML_ASSERT(op->type == GGML_TYPE_F32);
 
     const int32_t s0 = ggml_get_op_params_i32(op, 0);
@@ -3766,6 +3770,7 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
     const int32_t input_length  = (int32_t) input->ne[0];
     const int32_t rows          = output_length * batch;
     const int32_t k_total       = kernel * in_channels;
+    const float pre_relu_slope  = ggml_get_op_params_f32(op, 3);
 
     ggml_metal_kargs_kokoro_conv_1d args = {
         /* .output_length = */ output_length,
@@ -3783,8 +3788,17 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
         /* .weight_nb0    = */ weight->nb[0] / sizeof(float),
         /* .weight_nb1    = */ weight->nb[1] / sizeof(float),
         /* .weight_nb2    = */ weight->nb[2] / sizeof(float),
+        /* .bias_nb0      = */ bias ? bias->nb[0] / sizeof(float) : 0,
+        /* .bias_nb1      = */ bias ? bias->nb[1] / sizeof(float) : 0,
+        /* .residual_nb0  = */ res  ? res->nb[0]  / sizeof(float) : 0,
+        /* .residual_nb1  = */ res  ? res->nb[1]  / sizeof(float) : 0,
+        /* .residual_nb2  = */ res  ? res->nb[2]  / sizeof(float) : 0,
         /* .rows          = */ rows,
         /* .k_total       = */ k_total,
+        /* .bias_ne0      = */ bias ? (int32_t) bias->ne[0] : 0,
+        /* .has_bias      = */ bias ? 1 : 0,
+        /* .has_residual  = */ res  ? 1 : 0,
+        /* .pre_relu_slope = */ pre_relu_slope,
     };
 
     auto pipeline = ggml_metal_library_get_pipeline_kokoro_conv_1d(lib, op);
@@ -3794,6 +3808,8 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(weight), 1);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(input),  2);
     ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),     3);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(bias),   4);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(res),    5);
     ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
 
     ggml_metal_encoder_dispatch_threadgroups(

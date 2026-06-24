@@ -1792,7 +1792,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_kokoro_conv_1d(g
     res.nr0 = 64;
     res.nr1 = 32;
     res.nsg = N_MM_SIMD_GROUP_X * N_MM_SIMD_GROUP_Y;
-    res.smem = 4096 + 2048;
+    res.smem = 8192;
 
     return res;
 }

@@ -2655,6 +2655,17 @@ extern "C" {
             int                   p0,
             int                   d0);
 
+    GGML_API struct ggml_tensor * ggml_kokoro_conv_1d_ex(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * input,
+            struct ggml_tensor  * bias,
+            struct ggml_tensor  * residual,
+            int                   s0,
+            int                   p0,
+            int                   d0,
+            float                 pre_relu_slope);
+
     // Style-Bert-VITS2-specific fused ConvTranspose1D + crop + bias.
     // Expects:
     // weight: [kernel, out_channels, in_channels]

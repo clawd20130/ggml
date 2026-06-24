@@ -10176,6 +10176,8 @@ kernel void kernel_kokoro_conv_1d_f32(
         device const float * weight,
         device const float * input,
         device       char  * dst,
+        device const float * bias,
+        device const float * residual,
         threadgroup  char  * shmem [[threadgroup(0)]],
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiitg[[thread_index_in_threadgroup]],
@@ -10230,9 +10232,13 @@ kernel void kernel_kokoro_conv_1d_f32(
                 const int kw = k - ic*args.kernel_size;
                 const int iw = ow*args.s0 + kw*args.d0 - args.p0;
                 if (iw >= 0 && iw < args.input_length) {
-                    v = (half) input[(uint64_t) iw*args.input_nb0 +
-                                     (uint64_t) ic*args.input_nb1 +
-                                     (uint64_t) n *args.input_nb2];
+                    float x = input[(uint64_t) iw*args.input_nb0 +
+                                    (uint64_t) ic*args.input_nb1 +
+                                    (uint64_t) n *args.input_nb2];
+                    if (args.pre_relu_slope >= 0.0f && x < 0.0f) {
+                        x *= args.pre_relu_slope;
+                    }
+                    v = (half) x;
                 }
             }
             *(sa + 64*ib + 8*ly + lx) = v;
@@ -10286,7 +10292,10 @@ kernel void kernel_kokoro_conv_1d_f32(
         }
     }
 
-    if (r0 + NR0 <= args.rows && r1 + NR1 <= args.out_channels) {
+    const bool direct_store = args.has_bias == 0 && args.has_residual == 0 &&
+        r0 + NR0 <= args.rows && r1 + NR1 <= args.out_channels;
+
+    if (direct_store) {
         device float * C = (device float *) dst +
             (r0 + 32*(sgitg & 1)) +
             (r1 + 16*(sgitg >> 1))*args.rows;
@@ -10308,19 +10317,26 @@ kernel void kernel_kokoro_conv_1d_f32(
         if (sgitg == 0) {
             for (int j = tiitg; j < nr1; j += NR1) {
                 device float  * D  = (device float *) dst + r0 + (r1 + j)*args.rows;
-                device float4 * D4 = (device float4 *) D;
 
                 threadgroup float  * C  = temp_str + j*NR0;
-                threadgroup float4 * C4 = (threadgroup float4 *) C;
+                const int out_channel = r1 + j;
+                const float b = args.has_bias
+                    ? (args.bias_ne0 == 1
+                        ? bias[(uint64_t) out_channel*args.bias_nb1]
+                        : bias[(uint64_t) out_channel*args.bias_nb0])
+                    : 0.0f;
 
-                int i = 0;
-                for (; i < nr0/4; i++) {
-                    *(D4 + i) = *(C4 + i);
-                }
-
-                i *= 4;
-                for (; i < nr0; i++) {
-                    *(D + i) = *(C + i);
+                for (int i = 0; i < nr0; i++) {
+                    const int row_i = r0 + i;
+                    const int out_t = row_i % args.output_length;
+                    const int out_b = row_i / args.output_length;
+                    float v = C[i] + b;
+                    if (args.has_residual) {
+                        v += residual[(uint64_t) out_t       * args.residual_nb0 +
+                                      (uint64_t) out_channel * args.residual_nb1 +
+                                      (uint64_t) out_b       * args.residual_nb2];
+                    }
+                    D[i] = v;
                 }
             }
         }

@@ -6443,6 +6443,19 @@ struct ggml_tensor * ggml_kokoro_conv_1d(
         int                   s0,
         int                   p0,
         int                   d0) {
+    return ggml_kokoro_conv_1d_ex(ctx, weight, input, NULL, NULL, s0, p0, d0, -1.0f);
+}
+
+struct ggml_tensor * ggml_kokoro_conv_1d_ex(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * weight,
+        struct ggml_tensor  * input,
+        struct ggml_tensor  * bias,
+        struct ggml_tensor  * residual,
+        int                   s0,
+        int                   p0,
+        int                   d0,
+        float                 pre_relu_slope) {
     GGML_ASSERT(weight->type == GGML_TYPE_F32);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(weight));
@@ -6451,16 +6464,30 @@ struct ggml_tensor * ggml_kokoro_conv_1d(
 
     const int64_t output_length = ggml_calc_conv_output_size(input->ne[0], weight->ne[0], s0, p0, d0);
     GGML_ASSERT(output_length > 0);
+    if (bias) {
+        GGML_ASSERT(bias->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_contiguous(bias));
+        GGML_ASSERT(bias->ne[0] == weight->ne[2] || (bias->ne[0] == 1 && bias->ne[1] == weight->ne[2]));
+    }
+    if (residual) {
+        GGML_ASSERT(residual->type == GGML_TYPE_F32);
+        GGML_ASSERT(residual->ne[0] == output_length);
+        GGML_ASSERT(residual->ne[1] == weight->ne[2]);
+        GGML_ASSERT(residual->ne[2] == input->ne[2]);
+    }
 
     const int64_t ne[3] = { output_length, weight->ne[2], input->ne[2] };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 3, ne);
 
     int32_t params[] = { s0, p0, d0 };
     ggml_set_op_params(result, params, sizeof(params));
+    ggml_set_op_params_f32(result, 3, pre_relu_slope);
 
     result->op     = GGML_OP_KOKORO_CONV_1D;
     result->src[0] = weight;
     result->src[1] = input;
+    result->src[2] = bias;
+    result->src[3] = residual;
 
     return result;
 }

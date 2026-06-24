@@ -19140,8 +19140,10 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             tensor_clone = ggml_kokoro_lstm_step(ggml_ctx, src_clone[0], src_clone[1],
             src_clone[2], src_clone[3]);
         } else if (tensor->op == GGML_OP_KOKORO_CONV_1D) {
-            tensor_clone = ggml_kokoro_conv_1d(ggml_ctx, src_clone[0], src_clone[1],
-            ggml_get_op_params_i32(tensor, 0), ggml_get_op_params_i32(tensor, 1), ggml_get_op_params_i32(tensor, 2));
+            tensor_clone = ggml_kokoro_conv_1d_ex(ggml_ctx, src_clone[0], src_clone[1],
+            src_clone[2], src_clone[3],
+            ggml_get_op_params_i32(tensor, 0), ggml_get_op_params_i32(tensor, 1), ggml_get_op_params_i32(tensor, 2),
+            ggml_get_op_params_f32(tensor, 3));
         } else if (tensor->op == GGML_OP_KOKORO_SNAKE_1D_T) {
             tensor_clone = ggml_kokoro_snake_1d_t(ggml_ctx, src_clone[0], src_clone[1]);
         } else if (tensor->op == GGML_OP_KOKORO_ADAIN_SNAKE_1D_T) {

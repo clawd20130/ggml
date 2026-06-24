@@ -11072,9 +11072,13 @@ static void ggml_compute_forward_kokoro_conv_1d_f32(
         struct ggml_tensor * dst) {
     const struct ggml_tensor * weight = dst->src[0];
     const struct ggml_tensor * input  = dst->src[1];
+    const struct ggml_tensor * bias   = dst->src[2];
+    const struct ggml_tensor * res    = dst->src[3];
 
     GGML_ASSERT(weight->type == GGML_TYPE_F32);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
+    GGML_ASSERT(!bias || bias->type == GGML_TYPE_F32);
+    GGML_ASSERT(!res  || res->type  == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
     const int64_t output_length = dst->ne[0];
@@ -11087,6 +11091,7 @@ static void ggml_compute_forward_kokoro_conv_1d_f32(
     const int32_t s0 = ggml_get_op_params_i32(dst, 0);
     const int32_t p0 = ggml_get_op_params_i32(dst, 1);
     const int32_t d0 = ggml_get_op_params_i32(dst, 2);
+    const float pre_relu_slope = ggml_get_op_params_f32(dst, 3);
 
     const int64_t rows = output_length * batch;
     const int64_t total = rows * out_channels;
@@ -11108,9 +11113,23 @@ static void ggml_compute_forward_kokoro_conv_1d_f32(
                 }
 
                 const float w = *(const float *)((const char *)weight->data + kw * weight->nb[0] + ic * weight->nb[1] + oc * weight->nb[2]);
-                const float x = *(const float *)((const char *)input->data + iw * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
+                float x = *(const float *)((const char *)input->data + iw * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
+                if (pre_relu_slope >= 0.0f && x < 0.0f) {
+                    x *= pre_relu_slope;
+                }
                 sum += w * x;
             }
+        }
+
+        if (bias) {
+            if (bias->ne[0] == 1) {
+                sum += *(const float *)((const char *)bias->data + oc * bias->nb[1]);
+            } else {
+                sum += *(const float *)((const char *)bias->data + oc * bias->nb[0]);
+            }
+        }
+        if (res) {
+            sum += *(const float *)((const char *)res->data + ow * res->nb[0] + oc * res->nb[1] + n * res->nb[2]);
         }
 
         ((float *)dst->data)[row + oc * rows] = sum;
