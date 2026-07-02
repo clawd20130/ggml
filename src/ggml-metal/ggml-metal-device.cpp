@@ -1780,13 +1780,16 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_im2col(ggml_meta
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_kokoro_conv_1d(ggml_metal_library_t lib, const ggml_tensor * op) {
     assert(op->op == GGML_OP_KOKORO_CONV_1D);
 
-    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32);
+    GGML_ASSERT(op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16);
     GGML_ASSERT(op->src[1]->type == GGML_TYPE_F32);
     GGML_ASSERT(op->type == GGML_TYPE_F32);
 
-    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, "kernel_kokoro_conv_1d_f32");
+    const char * kernel = op->src[0]->type == GGML_TYPE_F16
+        ? "kernel_kokoro_conv_1d_f16"
+        : "kernel_kokoro_conv_1d_f32";
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, kernel);
     if (!res.pipeline) {
-        res = ggml_metal_library_compile_pipeline(lib, "kernel_kokoro_conv_1d_f32", "kernel_kokoro_conv_1d_f32", nullptr);
+        res = ggml_metal_library_compile_pipeline(lib, kernel, kernel, nullptr);
     }
 
     res.nr0 = 64;

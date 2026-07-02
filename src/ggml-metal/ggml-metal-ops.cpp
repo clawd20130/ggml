@@ -3752,7 +3752,7 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
     ggml_tensor * bias   = op->src[2];
     ggml_tensor * res    = op->src[3];
 
-    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
     GGML_ASSERT(!bias || bias->type == GGML_TYPE_F32);
     GGML_ASSERT(!res  || res->type  == GGML_TYPE_F32);
@@ -3785,9 +3785,9 @@ int ggml_metal_op_kokoro_conv_1d(ggml_metal_op_t ctx, int idx) {
         /* .input_nb0     = */ input->nb[0] / sizeof(float),
         /* .input_nb1     = */ input->nb[1] / sizeof(float),
         /* .input_nb2     = */ input->nb[2] / sizeof(float),
-        /* .weight_nb0    = */ weight->nb[0] / sizeof(float),
-        /* .weight_nb1    = */ weight->nb[1] / sizeof(float),
-        /* .weight_nb2    = */ weight->nb[2] / sizeof(float),
+        /* .weight_nb0    = */ weight->nb[0] / ggml_type_size(weight->type),
+        /* .weight_nb1    = */ weight->nb[1] / ggml_type_size(weight->type),
+        /* .weight_nb2    = */ weight->nb[2] / ggml_type_size(weight->type),
         /* .bias_nb0      = */ bias ? bias->nb[0] / sizeof(float) : 0,
         /* .bias_nb1      = */ bias ? bias->nb[1] / sizeof(float) : 0,
         /* .residual_nb0  = */ res  ? res->nb[0]  / sizeof(float) : 0,

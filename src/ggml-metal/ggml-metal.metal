@@ -10171,9 +10171,19 @@ kernel void kernel_mul_mm(
 
 #endif // GGML_METAL_HAS_TENSOR
 
-kernel void kernel_kokoro_conv_1d_f32(
+template<typename weight_t>
+static inline half kernel_kokoro_conv_1d_weight_to_half(weight_t value) {
+    return (half) value;
+}
+
+static inline half kernel_kokoro_conv_1d_weight_to_half(half value) {
+    return value;
+}
+
+template<typename weight_t>
+static inline void kernel_kokoro_conv_1d_impl(
         constant ggml_metal_kargs_kokoro_conv_1d & args,
-        device const float * weight,
+        device const weight_t * weight,
         device const float * input,
         device       char  * dst,
         device const float * bias,
@@ -10256,9 +10266,10 @@ kernel void kernel_kokoro_conv_1d_f32(
             if (r1 + lr1 < args.out_channels && k < args.k_total) {
                 const int ic = k / args.kernel_size;
                 const int kw = k - ic*args.kernel_size;
-                v = (half) weight[(uint64_t) kw       *args.weight_nb0 +
-                                  (uint64_t) ic       *args.weight_nb1 +
-                                  (uint64_t) (r1+lr1)*args.weight_nb2];
+                v = kernel_kokoro_conv_1d_weight_to_half(
+                    weight[(uint64_t) kw       *args.weight_nb0 +
+                           (uint64_t) ic       *args.weight_nb1 +
+                           (uint64_t) (r1+lr1)*args.weight_nb2]);
             }
             *(sb + 64*ib + 8*ly + lx) = v;
         }
@@ -10341,6 +10352,34 @@ kernel void kernel_kokoro_conv_1d_f32(
             }
         }
     }
+}
+
+kernel void kernel_kokoro_conv_1d_f32(
+        constant ggml_metal_kargs_kokoro_conv_1d & args,
+        device const float * weight,
+        device const float * input,
+        device       char  * dst,
+        device const float * bias,
+        device const float * residual,
+        threadgroup  char  * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+    kernel_kokoro_conv_1d_impl(args, weight, input, dst, bias, residual, shmem, tgpig, tiitg, sgitg);
+}
+
+kernel void kernel_kokoro_conv_1d_f16(
+        constant ggml_metal_kargs_kokoro_conv_1d & args,
+        device const half * weight,
+        device const float * input,
+        device       char  * dst,
+        device const float * bias,
+        device const float * residual,
+        threadgroup  char  * shmem [[threadgroup(0)]],
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiitg[[thread_index_in_threadgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+    kernel_kokoro_conv_1d_impl(args, weight, input, dst, bias, residual, shmem, tgpig, tiitg, sgitg);
 }
 
 template<short ne20> // n_expert_used

@@ -6456,7 +6456,7 @@ struct ggml_tensor * ggml_kokoro_conv_1d_ex(
         int                   p0,
         int                   d0,
         float                 pre_relu_slope) {
-    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(weight));
     GGML_ASSERT(weight->ne[1] == input->ne[1]);

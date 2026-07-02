@@ -11075,7 +11075,7 @@ static void ggml_compute_forward_kokoro_conv_1d_f32(
     const struct ggml_tensor * bias   = dst->src[2];
     const struct ggml_tensor * res    = dst->src[3];
 
-    GGML_ASSERT(weight->type == GGML_TYPE_F32);
+    GGML_ASSERT(weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16);
     GGML_ASSERT(input->type == GGML_TYPE_F32);
     GGML_ASSERT(!bias || bias->type == GGML_TYPE_F32);
     GGML_ASSERT(!res  || res->type  == GGML_TYPE_F32);
@@ -11112,7 +11112,10 @@ static void ggml_compute_forward_kokoro_conv_1d_f32(
                     continue;
                 }
 
-                const float w = *(const float *)((const char *)weight->data + kw * weight->nb[0] + ic * weight->nb[1] + oc * weight->nb[2]);
+                const char * w_data = (const char *)weight->data + kw * weight->nb[0] + ic * weight->nb[1] + oc * weight->nb[2];
+                const float w = weight->type == GGML_TYPE_F16
+                    ? GGML_CPU_FP16_TO_FP32(*(const ggml_fp16_t *) w_data)
+                    : *(const float *) w_data;
                 float x = *(const float *)((const char *)input->data + iw * input->nb[0] + ic * input->nb[1] + n * input->nb[2]);
                 if (pre_relu_slope >= 0.0f && x < 0.0f) {
                     x *= pre_relu_slope;
@@ -11141,6 +11144,7 @@ void ggml_compute_forward_kokoro_conv_1d(
         struct ggml_tensor * dst) {
     switch (dst->src[0]->type) {
         case GGML_TYPE_F32:
+        case GGML_TYPE_F16:
             {
                 ggml_compute_forward_kokoro_conv_1d_f32(params, dst);
             } break;
