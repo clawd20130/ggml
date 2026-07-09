@@ -918,6 +918,9 @@ struct vk_device_struct {
     vk_pipeline pipeline_kokoro_lstm_scan_f32;
     vk_pipeline pipeline_kokoro_lstm_step_f32;
     vk_pipeline pipeline_kokoro_conv_1d_f32;
+    vk_pipeline pipeline_kokoro_conv_1d_f16;
+    vk_pipeline pipeline_kokoro_conv_1d_tiled_f32;
+    vk_pipeline pipeline_kokoro_conv_1d_tiled_f16;
     vk_pipeline pipeline_kokoro_snake_1d_t_f32;
     vk_pipeline pipeline_kokoro_adain_snake_1d_t_f32;
     vk_pipeline pipeline_pool2d_f32;
@@ -1665,6 +1668,13 @@ struct vk_op_kokoro_conv_1d_push_constants {
     uint32_t weight_nb2;
     uint32_t dst_nb1;
     uint32_t dst_nb2;
+    uint32_t has_bias;
+    uint32_t has_residual;
+    float pre_relu_slope;
+    uint32_t bias_stride;
+    uint32_t res_nb0;
+    uint32_t res_nb1;
+    uint32_t res_nb2;
 };
 
 struct vk_op_kokoro_snake_1d_t_push_constants {
@@ -5382,7 +5392,11 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     ggml_vk_create_pipeline(device, device->pipeline_kokoro_lstm_scan_f32, "kokoro_lstm_scan_f32", kokoro_lstm_scan_f32_len, kokoro_lstm_scan_f32_data, "main", 6, sizeof(vk_op_kokoro_lstm_scan_push_constants), {1, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_kokoro_lstm_step_f32, "kokoro_lstm_step_f32", kokoro_lstm_step_f32_len, kokoro_lstm_step_f32_data, "main", 5, sizeof(vk_op_kokoro_lstm_step_push_constants), {256, 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_f32, "kokoro_conv_1d_f32", kokoro_conv_1d_f32_len, kokoro_conv_1d_f32_data, "main", 3, sizeof(vk_op_kokoro_conv_1d_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_f32, "kokoro_conv_1d_f32", kokoro_conv_1d_f32_len, kokoro_conv_1d_f32_data, "main", 5, sizeof(vk_op_kokoro_conv_1d_push_constants), {256, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_f16, "kokoro_conv_1d_f16", kokoro_conv_1d_f16_len, kokoro_conv_1d_f16_data, "main", 5, sizeof(vk_op_kokoro_conv_1d_push_constants), {256, 1, 1}, {}, 1);
+    // wg_denoms match the BM x BN output tile in kokoro_conv_1d_tiled.comp
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_tiled_f32, "kokoro_conv_1d_tiled_f32", kokoro_conv_1d_tiled_f32_len, kokoro_conv_1d_tiled_f32_data, "main", 5, sizeof(vk_op_kokoro_conv_1d_push_constants), {64, 32, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_kokoro_conv_1d_tiled_f16, "kokoro_conv_1d_tiled_f16", kokoro_conv_1d_tiled_f16_len, kokoro_conv_1d_tiled_f16_data, "main", 5, sizeof(vk_op_kokoro_conv_1d_push_constants), {64, 32, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_kokoro_snake_1d_t_f32, "kokoro_snake_1d_t_f32", kokoro_snake_1d_t_f32_len, kokoro_snake_1d_t_f32_data, "main", 3, sizeof(vk_op_kokoro_snake_1d_t_push_constants), {256, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_kokoro_adain_snake_1d_t_f32, "kokoro_adain_snake_1d_t_f32", kokoro_adain_snake_1d_t_f32_len, kokoro_adain_snake_1d_t_f32_data, "main", 5, sizeof(vk_op_kokoro_adain_snake_1d_t_push_constants), {256, 1, 1}, {}, 1);
 
@@ -13614,13 +13628,24 @@ static void ggml_vk_kokoro_lstm_step(ggml_backend_vk_context * ctx, vk_context& 
 static bool ggml_vk_kokoro_conv_1d_supported(const ggml_tensor * op) {
     const ggml_tensor * weight = op->src[0];
     const ggml_tensor * input  = op->src[1];
+    const ggml_tensor * bias   = op->src[2];
+    const ggml_tensor * res    = op->src[3];
 
     if (op->type != GGML_TYPE_F32 || weight == nullptr || input == nullptr ||
-        weight->type != GGML_TYPE_F32 || input->type != GGML_TYPE_F32) {
+        (weight->type != GGML_TYPE_F32 && weight->type != GGML_TYPE_F16) ||
+        input->type != GGML_TYPE_F32) {
         return false;
     }
 
     if (!ggml_is_contiguous(weight) || !ggml_is_contiguous(op)) {
+        return false;
+    }
+
+    if (bias && (bias->type != GGML_TYPE_F32 || !ggml_is_contiguous(bias))) {
+        return false;
+    }
+    if (res && (res->type != GGML_TYPE_F32 ||
+                res->ne[0] != op->ne[0] || res->ne[1] != op->ne[1] || res->ne[2] != op->ne[2])) {
         return false;
     }
 
@@ -13632,13 +13657,29 @@ static void ggml_vk_kokoro_conv_1d(ggml_backend_vk_context * ctx, vk_context& su
     GGML_ASSERT(dst->op == GGML_OP_KOKORO_CONV_1D);
     GGML_ASSERT(ggml_vk_kokoro_conv_1d_supported(dst));
 
-    vk_pipeline pipeline = ctx->device->pipeline_kokoro_conv_1d_f32;
+    const ggml_tensor * weight = dst->src[0];
+    const ggml_tensor * input  = dst->src[1];
+    const ggml_tensor * bias   = dst->src[2];
+    const ggml_tensor * res    = dst->src[3];
+
+    const uint32_t rows = (uint32_t)(dst->ne[0] * dst->ne[2]);
+    const uint32_t k_total = (uint32_t)(weight->ne[0] * weight->ne[1]);
+    // The tiled GEMM-style kernel wins on large tiles; tiny convs (short rows or
+    // small reduction) stay on the one-thread-per-output kernel.
+    const bool use_tiled = rows >= 256 && k_total >= 16;
+
+    vk_pipeline pipeline = weight->type == GGML_TYPE_F16
+        ? (use_tiled ? ctx->device->pipeline_kokoro_conv_1d_tiled_f16 : ctx->device->pipeline_kokoro_conv_1d_f16)
+        : (use_tiled ? ctx->device->pipeline_kokoro_conv_1d_tiled_f32 : ctx->device->pipeline_kokoro_conv_1d_f32);
     if (pipeline == nullptr) {
         GGML_ABORT("ggml_vulkan: missing Kokoro Conv1D pipeline");
     }
 
-    const ggml_tensor * weight = dst->src[0];
-    const ggml_tensor * input  = dst->src[1];
+    const size_t wsize = ggml_type_size(weight->type);
+    // bias may be stored as [OC] or [1, OC]; pick the stride that walks output channels
+    const uint32_t bias_stride = bias
+        ? (uint32_t)((bias->ne[0] == 1 ? bias->nb[1] : bias->nb[0]) / sizeof(float))
+        : 0;
 
     const vk_op_kokoro_conv_1d_push_constants pc = {
         (uint32_t)dst->ne[0],
@@ -13653,18 +13694,32 @@ static void ggml_vk_kokoro_conv_1d(ggml_backend_vk_context * ctx, vk_context& su
         (uint32_t)(input->nb[0] / sizeof(float)),
         (uint32_t)(input->nb[1] / sizeof(float)),
         (uint32_t)(input->nb[2] / sizeof(float)),
-        (uint32_t)(weight->nb[1] / sizeof(float)),
-        (uint32_t)(weight->nb[2] / sizeof(float)),
+        (uint32_t)(weight->nb[1] / wsize),
+        (uint32_t)(weight->nb[2] / wsize),
         (uint32_t)(dst->nb[1] / sizeof(float)),
         (uint32_t)(dst->nb[2] / sizeof(float)),
+        bias ? 1u : 0u,
+        res ? 1u : 0u,
+        ggml_get_op_params_f32(dst, 3),
+        bias_stride,
+        res ? (uint32_t)(res->nb[0] / sizeof(float)) : 0,
+        res ? (uint32_t)(res->nb[1] / sizeof(float)) : 0,
+        res ? (uint32_t)(res->nb[2] / sizeof(float)) : 0,
     };
 
+    // optional bias/residual bindings fall back to dst; the shader gates on has_bias/has_residual
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    const std::array<uint32_t, 3> elements = use_tiled
+        ? std::array<uint32_t, 3>{rows, (uint32_t)dst->ne[1], 1}
+        : std::array<uint32_t, 3>{(uint32_t)ggml_nelements(dst), 1, 1};
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {
         ggml_vk_tensor_subbuffer(ctx, weight, true),
         ggml_vk_tensor_subbuffer(ctx, input, true),
-        ggml_vk_tensor_subbuffer(ctx, dst, true),
-    }, pc, {(uint32_t)ggml_nelements(dst), 1, 1});
+        dst_buf,
+        bias ? ggml_vk_tensor_subbuffer(ctx, bias, true) : dst_buf,
+        res  ? ggml_vk_tensor_subbuffer(ctx, res,  true) : dst_buf,
+    }, pc, elements);
 }
 
 static bool ggml_vk_kokoro_snake_1d_t_supported(const ggml_tensor * op) {

@@ -1027,7 +1027,10 @@ void process_shaders() {
 
     string_to_spv("kokoro_lstm_scan_f32", "kokoro_lstm_scan.comp", {});
     string_to_spv("kokoro_lstm_step_f32", "kokoro_lstm_step.comp", {});
-    string_to_spv("kokoro_conv_1d_f32", "kokoro_conv_1d.comp", {});
+    string_to_spv("kokoro_conv_1d_f32", "kokoro_conv_1d.comp", {{"WEIGHT_TYPE", "float"}});
+    string_to_spv("kokoro_conv_1d_f16", "kokoro_conv_1d.comp", {{"WEIGHT_TYPE", "float16_t"}});
+    string_to_spv("kokoro_conv_1d_tiled_f32", "kokoro_conv_1d_tiled.comp", {{"WEIGHT_TYPE", "float"}});
+    string_to_spv("kokoro_conv_1d_tiled_f16", "kokoro_conv_1d_tiled.comp", {{"WEIGHT_TYPE", "float16_t"}});
     string_to_spv("kokoro_snake_1d_t_f32", "kokoro_snake_1d_t.comp", {});
     string_to_spv("kokoro_adain_snake_1d_t_f32", "kokoro_adain_snake_1d_t.comp", {});
 

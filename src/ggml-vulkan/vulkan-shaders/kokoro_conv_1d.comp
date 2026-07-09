@@ -1,5 +1,7 @@
 #version 450
 
+#extension GL_EXT_shader_16bit_storage : require
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform parameter {
@@ -19,11 +21,20 @@ layout(push_constant) uniform parameter {
     uint weight_nb2;
     uint dst_nb1;
     uint dst_nb2;
+    uint has_bias;
+    uint has_residual;
+    float pre_relu_slope;
+    uint bias_stride;
+    uint res_nb0;
+    uint res_nb1;
+    uint res_nb2;
 } p;
 
-layout(binding = 0) readonly buffer Weight { float weight[]; };
+layout(binding = 0) readonly buffer Weight { WEIGHT_TYPE weight[]; };
 layout(binding = 1) readonly buffer Input { float input_data[]; };
 layout(binding = 2) writeonly buffer Dst { float dst[]; };
+layout(binding = 3) readonly buffer Bias { float bias_data[]; };
+layout(binding = 4) readonly buffer Residual { float residual_data[]; };
 
 void main() {
     const uint idx = gl_GlobalInvocationID.x;
@@ -48,8 +59,19 @@ void main() {
 
             const uint weight_offset = kw + ic * p.weight_nb1 + oc * p.weight_nb2;
             const uint input_offset = uint(iw) * p.input_nb0 + ic * p.input_nb1 + n * p.input_nb2;
-            sum += weight[weight_offset] * input_data[input_offset];
+            float x = input_data[input_offset];
+            if (p.pre_relu_slope >= 0.0 && x < 0.0) {
+                x *= p.pre_relu_slope;
+            }
+            sum += float(weight[weight_offset]) * x;
         }
+    }
+
+    if (p.has_bias != 0u) {
+        sum += bias_data[oc * p.bias_stride];
+    }
+    if (p.has_residual != 0u) {
+        sum += residual_data[ow * p.res_nb0 + oc * p.res_nb1 + n * p.res_nb2];
     }
 
     dst[row + oc * rows] = sum;

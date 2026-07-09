@@ -1,0 +1,151 @@
+#version 450
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+
+// Tiled direct conv1d formulated as GEMM over K = IC*KW, with the im2col tile
+// built on the fly in shared memory. Fuses pre-relu on load and bias/residual
+// on store. One workgroup computes a BM x BN tile of the [rows x OC] output.
+
+#define BM 64
+#define BN 32
+#define BK 32
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint output_length;
+    uint out_channels;
+    uint in_channels;
+    uint batch;
+    uint kernel;
+    uint input_length;
+    int s0;
+    int p0;
+    int d0;
+    uint input_nb0;
+    uint input_nb1;
+    uint input_nb2;
+    uint weight_nb1;
+    uint weight_nb2;
+    uint dst_nb1;
+    uint dst_nb2;
+    uint has_bias;
+    uint has_residual;
+    float pre_relu_slope;
+    uint bias_stride;
+    uint res_nb0;
+    uint res_nb1;
+    uint res_nb2;
+} p;
+
+layout(binding = 0) readonly buffer Weight { WEIGHT_TYPE weight[]; };
+layout(binding = 1) readonly buffer Input { float input_data[]; };
+layout(binding = 2) writeonly buffer Dst { float dst[]; };
+layout(binding = 3) readonly buffer Bias { float bias_data[]; };
+layout(binding = 4) readonly buffer Residual { float residual_data[]; };
+
+shared float sa[BK][BM];
+shared float sb[BK][BN];
+
+void main() {
+    const uint rows = p.output_length * p.batch;
+    const uint k_total = p.in_channels * p.kernel;
+
+    const uint row0 = gl_WorkGroupID.x * BM;
+    const uint oc0  = gl_WorkGroupID.y * BN;
+
+    const uint tid = gl_LocalInvocationID.x;
+    // 16x16 thread grid: each thread owns 4 consecutive rows x 2 consecutive cols
+    const uint tx = tid % 16u;       // row group
+    const uint ty = tid / 16u;       // col group
+    const uint tr = row0 + tx * 4u;  // first row of this thread
+    const uint tc = oc0 + ty * 2u;   // first col of this thread
+
+    float acc[4][2];
+    [[unroll]] for (uint i = 0; i < 4; ++i) {
+        [[unroll]] for (uint j = 0; j < 2; ++j) {
+            acc[i][j] = 0.0;
+        }
+    }
+
+    for (uint k0 = 0; k0 < k_total; k0 += BK) {
+        // Build the im2col tile: sa[kk][m] = x(row0+m, k0+kk), pre-relu applied.
+        [[unroll]] for (uint i = 0; i < (BK * BM) / 256u; ++i) {
+            const uint idx = i * 256u + tid;
+            const uint m = idx % BM;
+            const uint kk = idx / BM;
+            const uint k = k0 + kk;
+            const uint row = row0 + m;
+
+            float v = 0.0;
+            if (k < k_total && row < rows) {
+                const uint ic = k / p.kernel;
+                const uint kw = k - ic * p.kernel;
+                const uint ow = row % p.output_length;
+                const uint n = row / p.output_length;
+                const int iw = int(ow) * p.s0 + int(kw) * p.d0 - p.p0;
+                if (iw >= 0 && iw < int(p.input_length)) {
+                    float x = input_data[uint(iw) * p.input_nb0 + ic * p.input_nb1 + n * p.input_nb2];
+                    if (p.pre_relu_slope >= 0.0 && x < 0.0) {
+                        x *= p.pre_relu_slope;
+                    }
+                    v = x;
+                }
+            }
+            sa[kk][m] = v;
+        }
+
+        // Weight tile: sb[kk][c] = w(oc0+c, k0+kk)
+        [[unroll]] for (uint i = 0; i < (BK * BN) / 256u; ++i) {
+            const uint idx = i * 256u + tid;
+            const uint c = idx % BN;
+            const uint kk = idx / BN;
+            const uint k = k0 + kk;
+            const uint oc = oc0 + c;
+
+            float w = 0.0;
+            if (k < k_total && oc < p.out_channels) {
+                const uint ic = k / p.kernel;
+                const uint kw = k - ic * p.kernel;
+                w = float(weight[kw + ic * p.weight_nb1 + oc * p.weight_nb2]);
+            }
+            sb[kk][c] = w;
+        }
+
+        barrier();
+
+        [[unroll]] for (uint kk = 0; kk < BK; ++kk) {
+            const float b0 = sb[kk][ty * 2u];
+            const float b1 = sb[kk][ty * 2u + 1u];
+            [[unroll]] for (uint i = 0; i < 4; ++i) {
+                const float a = sa[kk][tx * 4u + i];
+                acc[i][0] += a * b0;
+                acc[i][1] += a * b1;
+            }
+        }
+
+        barrier();
+    }
+
+    [[unroll]] for (uint j = 0; j < 2; ++j) {
+        const uint oc = tc + j;
+        if (oc >= p.out_channels) {
+            continue;
+        }
+        const float b = p.has_bias != 0u ? bias_data[oc * p.bias_stride] : 0.0;
+        [[unroll]] for (uint i = 0; i < 4; ++i) {
+            const uint row = tr + i;
+            if (row >= rows) {
+                continue;
+            }
+            float v = acc[i][j] + b;
+            if (p.has_residual != 0u) {
+                const uint ow = row % p.output_length;
+                const uint n = row / p.output_length;
+                v += residual_data[ow * p.res_nb0 + oc * p.res_nb1 + n * p.res_nb2];
+            }
+            dst[row + oc * rows] = v;
+        }
+    }
+}
